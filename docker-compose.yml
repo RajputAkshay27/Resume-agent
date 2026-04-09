@@ -1,0 +1,39 @@
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    ports:
+      - "3000:3000"
+    # Load all variables directly from .env
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - HOSTNAME=0.0.0.0
+      - AGENT_URL=http://backend:8000
+      - NEXT_PUBLIC_AGENT_URL=http://localhost:8000
+      - DATABASE_URL=file:/app/data/dev.db
+    volumes:
+      - frontend_data:/app/data
+    depends_on:
+      - backend
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    ports:
+      - "8000:8000"
+    # Load all variables directly from .env
+    env_file:
+      - .env
+    environment:
+      - FRONTEND_URL=http://frontend:3000
+    volumes:
+      - agent_data:/app/agent
+      - /app/agent/.venv  # Protect venv from volume overwriting
+
+volumes:
+  frontend_data:
+  agent_data:

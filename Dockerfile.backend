@@ -1,0 +1,41 @@
+# --- Stage 1: Build Python Agent ---
+FROM python:3.12-slim AS builder
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+WORKDIR /app/agent
+COPY agent/pyproject.toml agent/uv.lock ./
+# Use cache mount for uv dependencies
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-install-project
+
+# --- Stage 2: Final Production Image ---
+FROM python:3.12-slim AS runner
+
+# Set non-interactive to avoid debconf warnings
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install LaTeX (will be cached)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    # Minimal TeX Live components for PDF generation
+    texlive-latex-base \
+    texlive-latex-recommended \
+    texlive-fonts-recommended \
+    texlive-plain-generic \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy uv binary directly from the official image
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+WORKDIR /app/agent
+
+# Copy agent code and virtual environment
+COPY --from=builder /app/agent/.venv /app/agent/.venv
+COPY agent/ /app/agent/
+
+# Ensure we use the venv python
+ENV PATH="/app/agent/.venv/bin:$PATH"
+
+EXPOSE 8000
+CMD ["python", "main.py"]

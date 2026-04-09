@@ -1,0 +1,34 @@
+# --- Stage 1: Build Next.js ---
+FROM node:22-slim AS builder
+# Install openssl for Prisma
+RUN apt-get update && apt-get install -y openssl && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY package.json package-lock.json ./
+# Use cache mount to speed up npm ci
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --ignore-scripts
+COPY . .
+# Use a dummy DATABASE_URL for prisma generate and use cache mount for build
+RUN --mount=type=cache,target=/app/.next/cache \
+    DATABASE_URL="file:./dev.db" PRISMA_CLI_QUERY_ENGINE_TYPE="binary" npx prisma generate && \
+    npm run build
+
+# --- Stage 2: Final Production Image ---
+FROM node:22-slim AS runner
+# Install openssl for Prisma
+RUN apt-get update && apt-get install -y openssl && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
+ENV PRISMA_CLI_QUERY_ENGINE_TYPE="binary"
+
+# Copy Next.js standalone build
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/.next/static ./.next/static
+COPY --from=builder /app/prisma ./prisma
+
+EXPOSE 3000
+CMD ["node", "server.js"]

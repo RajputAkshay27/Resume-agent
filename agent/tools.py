@@ -8,17 +8,14 @@ the structured generation / LaTeX compilation pipeline.
 import os
 import json
 import logging
-import shutil
-import tempfile
 import urllib.request
-import base64
 
 from google.adk.tools.tool_context import ToolContext
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.llm_response import LlmResponse
 from pydantic import ValidationError
 from schemas import SectionPreferences, TailoredResume
-from latex_bridge import render_resume, compile_pdf, validate_template as _validate_template
+from latex_bridge import validate_template as _validate_template
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +35,8 @@ def _get_thread_id(tool_context: ToolContext) -> str:
 def _internal_get(path: str) -> dict:
     """Authenticated GET to the Next.js internal API."""
     secret = os.getenv("NEXTAUTH_SECRET", "super_secret_temporary_key_replace_me_in_production")
-    url = f"http://localhost:3000{path}"
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3001").rstrip("/")
+    url = f"{frontend_url}{path}"
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {secret}"})
     with urllib.request.urlopen(req) as resp:
         return json.loads(resp.read().decode())
@@ -47,7 +45,8 @@ def _internal_get(path: str) -> dict:
 def _internal_post(path: str, data: dict) -> dict:
     """Authenticated POST to the Next.js internal API."""
     secret = os.getenv("NEXTAUTH_SECRET", "super_secret_temporary_key_replace_me_in_production")
-    url = f"http://localhost:3000{path}"
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3001").rstrip("/")
+    url = f"{frontend_url}{path}"
     body = json.dumps(data).encode("utf-8")
     req = urllib.request.Request(
         url, data=body,
@@ -182,84 +181,80 @@ def read_state(tool_context: ToolContext):
 # Tool: Render and Compile PDF
 # ---------------------------------------------------------------------------
 
-def render_and_compile(tool_context: ToolContext):
-    """Render the tailored resume data into the Jinja2 LaTeX template, compile to PDF, and upload to storage. Deletes the previous PDF before storing the new one."""
+def render_latex(tool_context: ToolContext):
+    """Render the tailored resume data into a Jinja2 LaTeX template and store the .tex file in S3.
+    The PDF will be compiled on-demand when the user clicks the download button."""
     try:
-        # Read the output saved automatically by ADK output_key="tailored_resume"
         tailored = tool_context.state.get("tailored_resume")
         if not tailored:
             return "No tailored resume data in state. Please make sure the tailoring_agent has successfully generated it."
 
-
         thread_id = _get_thread_id(tool_context)
 
-        # 1. Fetch the template from the internal API
+        # 1. Fetch context (template_key and tailored profile) from the frontend API
         data = _internal_get(f"/api/internal/context?threadId={thread_id}")
-        template_content = data.get("templateContent")
-        if not template_content:
-            return "No Jinja2 LaTeX template found. Please upload a template in Settings."
+        template_key = data.get("templateKey")
+        if not template_key:
+            return "No LaTeX template found. Please upload a template in the context panel (Edit JD → Chat Template)."
 
-
-        old_pdf_key = data.get("pdfKey")
-
-        # 2. Validate template
-        validation = _validate_template(template_content)
-        if not validation["valid"]:
-            return f"Template validation failed: {'; '.join(validation['errors'])}"
-
-        # 3. Render
-        if isinstance(tailored, dict):
-            resume = TailoredResume(**tailored)
-        else:
-            # ADK already mapped it to the Pydantic instance natively
-            resume = tailored
-        rendered_tex = render_resume(template_content, resume)
-
-        with open(os.path.join(os.path.dirname(os.path.dirname(__file__)), "debug_render.tex"), "w", encoding="utf-8", newline="") as f:
-            f.write(rendered_tex)
-
-        # 4. Compile PDF
-        temp_dir = tempfile.mkdtemp(prefix="resume_compile_")
+        # 2. Validate and resolve the tailored resume
         try:
-            pdf_path = compile_pdf(rendered_tex, temp_dir)
+            # This handles 'unwrap_list' and strict type checking
+            validated_resume = TailoredResume(**tailored) if isinstance(tailored, dict) else tailored
+            tailored_dict = validated_resume.model_dump(exclude_none=True)
+        except ValidationError as e:
+            return f"Tailored resume validation failed. The format is incorrect: {e}"
+        except Exception as e:
+            return f"Could not parse tailored resume from state: {e}"
 
-            # 5. Read PDF binary
-            with open(pdf_path, "rb") as f:
-                pdf_data = f.read()
-            pdf_b64 = base64.b64encode(pdf_data).decode("utf-8")
+        # 3. Call the LaTeX Service /render endpoint
+        latex_service_url = os.getenv("LATEX_SERVICE_URL", "http://localhost:8002")
+        latex_service_url = latex_service_url.replace('"', '').replace("'", '').strip()
+        if not latex_service_url.startswith("http"):
+            latex_service_url = f"http://{latex_service_url}"
 
-            import time
-            timestamp = int(time.time())
-            # current_hash = hashlib.md5(rendered_tex.encode("utf-8")).hexdigest() # Commented out caching hash
-            # new_pdf_key = f"thread_pdfs/{thread_id}-{current_hash}.pdf"
-            new_pdf_key = f"thread_pdfs/{thread_id}-{timestamp}.pdf"
+        api_key = os.getenv("INTERNAL_API_KEY", "default_secret_key_change_me")
+        payload = {
+            "tailored_data": tailored_dict,
+            "template_key": template_key,
+            "thread_id": thread_id,
+        }
+        body = json.dumps(payload).encode("utf-8")
+        render_req = urllib.request.Request(
+            f"{latex_service_url}/render",
+            data=body,
+            headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(render_req, timeout=120) as resp:
+                result = json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode()
+            return f"LaTeX render failed (HTTP {e.code}): {error_body}"
+        except Exception as e:
+            return f"Could not reach LaTeX Service: {e}"
 
-            # 6. Delete old PDF first (requirement #8), then upload new one
-            # Also persist tailoredProfile so the /download-resume endpoint
-            # can find it (it reads from the Next.js API, not ADK session state).
-            tailored_dict = resume.model_dump(exclude_none=True) if hasattr(resume, "model_dump") else tailored
-            _internal_post("/api/internal/context", {
-                "threadId": thread_id,
-                "pdfKey": new_pdf_key,
-                "pdfHash": str(timestamp), # Use timestamp as hash to force refresh
-                "pdfData": pdf_b64,
-                "tailoredProfile": json.dumps(tailored_dict),
-                "deleteOldPdfKey": old_pdf_key if old_pdf_key and old_pdf_key != new_pdf_key else None,
-            })
+        tex_key = result.get("tex_key")
+        latex_hash = result.get("latex_hash")
 
-            return (
-                f"PDF compiled and uploaded to storage successfully!\n"
-                f"Key: {new_pdf_key}\n"
-                f"The user can download the PDF from the header button."
-            )
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
+        # 4. Persist tailored profile + tex metadata in the frontend DB
+        _internal_post("/api/internal/context", {
+            "threadId": thread_id,
+            "tailoredProfile": json.dumps(tailored_dict),
+            "texKey": tex_key,
+            "latexHash": latex_hash,
+        })
 
-    except RuntimeError as e:
-        return f"LaTeX compilation failed: {e}"
+        return (
+            f"LaTeX rendered and stored successfully!\n"
+            f"Hash: {latex_hash}\n"
+            f"The user can now download the PDF or LaTeX source from the header buttons."
+        )
+
     except Exception as e:
-        logger.error("[render_and_compile] Unhandled error: %s", e, exc_info=True)
-        return f"Error in render_and_compile: {str(e)}. Please retry or adjust your approach."
+        logger.error("[render_latex] Unhandled error: %s", e, exc_info=True)
+        return f"Error in render_latex: {str(e)}. Please retry."
 
 # ---------------------------------------------------------------------------
 # Tool for Tailoring Agent: Single combined context fetch

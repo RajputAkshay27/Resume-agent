@@ -24,8 +24,10 @@ model ChatThread {
   tailoredProfile String?  // JSON string — Pydantic-validated tailored resume data
   templateKey     String?  // S3 key — copy of the user's template for this thread
   sectionPrefs    String?  // JSON string — SectionPreferences for this generation
-  pdfKey          String?
-  pdfHash         String?
+  pdfKey          String?  // S3 key to the compiled PDF
+  pdfHash         String?  // Hash used when the PDF was last compiled
+  texKey          String?  // S3 key to the rendered .tex source file
+  latexHash       String?  // MD5 hash of rendered .tex (used to detect changes)
   jobDescription  String?
   jobUrl          String?
   userId          String

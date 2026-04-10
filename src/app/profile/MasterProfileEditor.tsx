@@ -169,19 +169,32 @@ export default function MasterProfileEditor() {
 
   // Save profile
   const save = useCallback(async () => {
+    let currentProfile = profile;
+    
+    // If in JSON mode, try to parse and update profile state before saving
+    if (showRawJson) {
+      try {
+        currentProfile = JSON.parse(rawJson);
+        setProfile(currentProfile);
+      } catch (e) {
+        alert("Cannot save: Invalid JSON in editor.");
+        return;
+      }
+    }
+
     setIsSaving(true);
     setSaveStatus("idle");
     try {
       const res = await fetch("/api/profile", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ masterProfile: profile }),
+        body: JSON.stringify({ masterProfile: currentProfile }),
       });
       setSaveStatus(res.ok ? "saved" : "error");
       if (res.ok) setTimeout(() => setSaveStatus("idle"), 3000);
     } catch { setSaveStatus("error"); }
     finally { setIsSaving(false); }
-  }, [profile]);
+  }, [profile, rawJson, showRawJson]);
 
   // Updaters
   const set = <K extends keyof MasterProfile>(key: K, val: MasterProfile[K]) =>
@@ -212,10 +225,21 @@ export default function MasterProfileEditor() {
     set("skills", s);
   };
 
-  // Raw JSON
+  // Raw JSON sync helpers
   const toggleRawJson = () => {
-    if (!showRawJson) setRawJson(JSON.stringify(profile, null, 2));
-    setShowRawJson(!showRawJson);
+    if (!showRawJson) {
+      // Switching TO Raw JSON: populate textarea from profile state
+      setRawJson(JSON.stringify(profile, null, 2));
+      setShowRawJson(true);
+    } else {
+      // Switching FROM Raw JSON: try to parse and update profile state
+      try {
+        setProfile(JSON.parse(rawJson));
+        setShowRawJson(false);
+      } catch {
+        alert("Invalid JSON! Please fix it before switching back to the form view.");
+      }
+    }
   };
   const applyRawJson = () => {
     try {

@@ -1,0 +1,146 @@
+%----------------------------------------------------------------------------------------
+%	DOCUMENT DEFINITION
+%----------------------------------------------------------------------------------------
+\documentclass[a4paper,10pt]{article}
+
+%----------------------------------------------------------------------------------------
+%	PACKAGES
+%----------------------------------------------------------------------------------------
+\usepackage{url}
+\usepackage{parskip} 	
+
+%other packages for formatting
+\RequirePackage{color}
+\RequirePackage{graphicx}
+\usepackage[dvipsnames]{xcolor}
+\usepackage[scale=0.92]{geometry}
+
+%tabularx environment
+\usepackage{tabularx}
+
+%for lists within experience section
+\usepackage{enumitem}
+
+% centered version of 'X' col.
+\newcolumntype{C}{>{\centering\arraybackslash}X} 
+
+%to prevent spillover of tabular into next pages
+\usepackage{supertabular}
+\newlength{\fullcollw}
+\setlength{\fullcollw}{0.47\textwidth}
+
+%custom \section
+\usepackage{titlesec}				
+\usepackage{multicol}
+\usepackage{multirow}
+
+%CV Sections inspired by: 
+%http://stefano.italians.nl/archives/26
+\titleformat{\section}{\Large\scshape\raggedright}{}{0em}{}[\titlerule]
+\titlespacing{\section}{0pt}{10pt}{10pt}
+
+%Setup hyperref package, and colours for links
+\usepackage[unicode, draft=false]{hyperref}
+\definecolor{linkcolour}{rgb}{0,0.2,0.6}
+\hypersetup{colorlinks,breaklinks,urlcolor=linkcolour,linkcolor=linkcolour}
+
+%----------------------------------------------------------------------------------------
+%	BEGIN DOCUMENT
+
+%----------------------------------------------------------------------------------------
+%	CUSTOM ENVIRONMENTS
+%----------------------------------------------------------------------------------------
+% Redesigned to avoid tabularx/minipage compilation errors while maintaining identical visuals
+\newenvironment{joblong}[2]
+    {
+    \noindent\textbf{#1} \hfill #2 \par\vspace{3.50pt}
+    \begin{itemize}[nosep, leftmargin=1em, itemsep=3pt,label=--]
+    }
+    {
+    \end{itemize}
+    \vspace{0.5em}
+    }
+
+%----------------------------------------------------------------------------------------
+%	BEGIN DOCUMENT
+%----------------------------------------------------------------------------------------
+\begin{document}
+
+% non-numbered pages
+\pagestyle{empty} 
+
+%----------------------------------------------------------------------------------------
+%	TITLE
+%----------------------------------------------------------------------------------------
+\begin{tabularx}{\linewidth}{@{} C @{}}
+\Huge{Akshaykumarsingh Rajput} \\ [7.0pt]
+\href{https://github.com/RajputAkshay27}{github.com/RajputAkshay27} \ $|$ \ \href{https://www.linkedin.com/in/akshay2710}{www.linkedin.com/in/akshay2710} \ $|$ \ \href{https://rajputakshay27.github.io/Portfolio/}{rajputakshay27.github.io/Portfolio/} \ $|$ \ \href{mailto:rajputakshay2710@gmail.com}{rajputakshay2710@gmail.com} \ $|$ \ \href{tel:+918511607538}{+918511607538} \\
+\end{tabularx}
+
+%----------------------------------------------------------------------------------------
+%	SUMMARY
+%----------------------------------------------------------------------------------------
+\section{Summary}
+Passionate DevOps Engineer with \textbf{2+ years of experience} building and managing \textbf{highly scalable, mission-critical platforms}. Expert in \textbf{automation, container orchestration (Kubernetes), and observability} across \textbf{multi-cloud environments (AWS, GCP, Azure)}. Proven track record in enhancing \textbf{system reliability (99.90\% availability)} and implementing \textbf{security protocols (FIPS compliance)} to support large-scale enterprise operations. Certified Kubernetes Administrator (CKA).
+
+%----------------------------------------------------------------------------------------
+%	WORK EXPERIENCE
+%----------------------------------------------------------------------------------------
+\section{Work Experience}
+
+\begin{joblong}{Software Engineer @ Motorola Solution}{June 2024 - Present}
+\item \textbf{Scalable Architecture:} Architected and co-led the migration of a legacy monolithic metrics system to a \textbf{horizontally scalable centralized architecture}, reducing yearly operational costs by \textbf{\$600k} while significantly improving system reliability.
+\item \textbf{Security and Compliance:} Led \textbf{FIPS compliance} initiatives for the \textbf{Prometheus monitoring stack}, implementing \textbf{cryptographic security protocols} and achieving \textbf{\$50,000 in savings} through optimized container images.
+\item \textbf{Platform Reliability:} Designed and implemented system improvements that increased \textbf{availability to 99.90\%}, ensuring the stability of \textbf{critical business operations}.
+\item \textbf{Multi-Cloud Automation:} Designed and deployed \textbf{automated workflows} managing \textbf{30+ Kubernetes clusters} across \textbf{multi-cloud environments}, significantly reducing operational overhead.
+\item \textbf{Automated Monitoring:} Engineered a \textbf{custom shell script} to collect \textbf{PVC storage utilization metrics}, integrated with the \textbf{Prometheus alerting system}, reducing disk-full incidents to near zero and preventing \textbf{multiple production outages}.
+\item \textbf{Incident Management:} Executed \textbf{on-call incident response} to resolve production outages, reducing \textbf{Mean Time to Resolution (MTTR)} and formalizing postmortem findings in \textbf{Incident Review Documents (IRDs)}.
+\end{joblong}
+\begin{joblong}{Software Engineer Intern @ Motorola Solution}{May 2023 - May 2024}
+\item \textbf{Performance Optimization:} Resolved a long-standing \textbf{CAdvisor metrics collection issue} (persisting for \textbf{1.5+ years}), eliminating the need for a secondary exporter and improving \textbf{system performance and cost efficiency}.
+\item \textbf{Observability Enhancement:} Built comprehensive \textbf{observability dashboards} providing real-time performance indicators, accelerating incident detection and reducing \textbf{Mean Time to Identify (MTTI) by 40\%}.
+\item \textbf{Dynamic Scaling:} Developed a custom \textbf{event-driven KEDA auto-scaler}, improving \textbf{microservices performance} and \textbf{resource utilization efficiency}.
+\end{joblong}
+
+
+%----------------------------------------------------------------------------------------
+%	PROJECTS
+%----------------------------------------------------------------------------------------
+
+%----------------------------------------------------------------------------------------
+%	SKILLS
+%----------------------------------------------------------------------------------------
+\section{Skills}
+\begin{tabularx}{\linewidth}{@{}l X@{}}
+\textbf{Cloud\_Platforms} & {\normalsize Google Cloud Platform (GCP), Amazon Web Services (AWS), Microsoft Azure} \\
+\textbf{Automation\_and\_Programming} & {\normalsize Python, Bash Scripting, GitHub Actions, Azure DevOps} \\
+\textbf{Containerization\_and\_Orchestration} & {\normalsize Kubernetes, Docker, EKS, Helm Charts} \\
+\textbf{Observability\_and\_Monitoring} & {\normalsize Prometheus, Thanos, Grafana, Alerting, CloudWatch, PagerDuty, KEDA, Runscope} \\
+\end{tabularx}
+
+%----------------------------------------------------------------------------------------
+%	ACHIEVEMENTS
+%----------------------------------------------------------------------------------------
+\section{Achievements}
+\begin{itemize}[nosep, leftmargin=1em, itemsep=3pt,label=--]
+\item 2025 CPS One Team Award - Recognized for \textbf{Partnership and collaboration} within and across teams.
+\item 2025 Hackolades Winner - Won the \textbf{“Hackolades - Palo Alto AI Runtime Security”} award at the Motorola Solutions 2025 Open Innovation Hackathon.
+\end{itemize}
+
+%----------------------------------------------------------------------------------------
+%	CERTIFICATIONS
+%----------------------------------------------------------------------------------------
+\section{Certifications}
+\begin{itemize}[nosep, leftmargin=1em, itemsep=3pt,label=--]
+\item CNCF Certified Kubernetes Administrator (CKA) (Expires: 09/2027)
+\item GCP Certified Professional Cloud Architect (Expires: 04/2027)
+\item GCP Certified Associate Cloud Engineer (Expires: 07/2027)
+\end{itemize}
+
+%----------------------------------------------------------------------------------------
+%	EDUCATION
+%----------------------------------------------------------------------------------------
+
+\vfill
+
+\end{document}

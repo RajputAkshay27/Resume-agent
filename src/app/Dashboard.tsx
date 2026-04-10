@@ -222,6 +222,9 @@ function ChatArea({ session, updateSession }: { session: ChatSession; updateSess
   const [showPrefs, setShowPrefs] = useState(false);
   const [prefs, setPrefs] = useState<SectionPrefs>(parsePrefs(session.sectionPrefs));
   const [isUploadingTemplate, setIsUploadingTemplate] = useState(false);
+  const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
+  const [isDownloadingTex, setIsDownloadingTex] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   useEffect(() => {
     setPrefs(parsePrefs(session.sectionPrefs));
@@ -268,9 +271,9 @@ function ChatArea({ session, updateSession }: { session: ChatSession; updateSess
     render: () => <div className="text-sm font-medium text-slate-400 p-2 border-l-2 border-emerald-400 opacity-80">Generating tailored resume (structured output)...</div>,
   });
   useCopilotAction({
-    name: "render_and_compile",
+    name: "render_latex",
     available: "disabled",
-    render: () => <div className="text-sm font-medium text-slate-400 p-2 border-l-2 border-amber-400 opacity-80">Compiling PDF from template...</div>,
+    render: () => <div className="text-sm font-medium text-slate-400 p-2 border-l-2 border-amber-400 opacity-80">Rendering LaTeX template...</div>,
   });
 
   const historyLoadedRef = useRef(false);
@@ -282,7 +285,7 @@ function ChatArea({ session, updateSession }: { session: ChatSession; updateSess
     // Determine if we need to rename this chat
     const DEFAULT_TITLE = "New Resume Chat";
     const needsRename = session.title?.trim().toLowerCase() === DEFAULT_TITLE.toLowerCase();
-    
+
     // Check if we have at least one user message
     const userMessages = messages.filter(m => String(m.role).toLowerCase() === "user");
     const firstUserMsg = userMessages[0];
@@ -293,13 +296,13 @@ function ChatArea({ session, updateSession }: { session: ChatSession; updateSess
     if (needsRename && firstUserMsg && !hasRenamedRef.current) {
       console.log(`[rename] Triggering rename for "${session.id}" using first message...`);
       hasRenamedRef.current = true;
-      
+
       const doRename = async () => {
         try {
           // Robust text extraction from first user message
           let content = firstUserMsg.content;
           let textToSummarize = "";
-          
+
           if (typeof content === "string") {
             textToSummarize = content;
           } else if (Array.isArray(content)) {
@@ -321,13 +324,13 @@ function ChatArea({ session, updateSession }: { session: ChatSession; updateSess
           }
 
           console.log(`[rename] Calling API with text: "${textToSummarize.substring(0, 40)}..."`);
-          
+
           const res = await fetch("/api/chats/rename", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ 
-              threadId: session.id, 
-              message: textToSummarize 
+            body: JSON.stringify({
+              threadId: session.id,
+              message: textToSummarize
             })
           });
 
@@ -348,23 +351,42 @@ function ChatArea({ session, updateSession }: { session: ChatSession; updateSess
     }
   }, [messages.length, session.id, session.title, isLoading, isAvailable]);
 
-  useEffect(() => { historyLoadedRef.current = false; }, [session.id]);
+  const pendingHistoryRef = useRef<{ id: string; role: string; content: string }[] | null>(null);
 
+  // 1. Reset historyLoadedRef specifically when the session ID changes
   useEffect(() => {
-    if (historyLoadedRef.current || isLoading || !isAvailable) return;
+    historyLoadedRef.current = false;
+    pendingHistoryRef.current = null;
+  }, [session.id]);
+  
+  // 2. Fetch history only if it hasn't been loaded for this session
+  useEffect(() => {
+    if (historyLoadedRef.current) return;
+    
+    // We only proceed if CopilotKit is ready
+    if (!isAvailable) return;
+
     const loadHistory = async () => {
       try {
+        console.log(`[history] Fetching history for ${session.id}`);
         const res = await fetch(`http://localhost:8000/history?threadId=${session.id}`);
-        if (!res.ok) return;
+        if (!res.ok) {
+          console.warn(`[history] Backend returned ${res.status}`);
+          return;
+        }
         const data = await res.json();
         const msgs: { id: string; role: string; content: string }[] = data.messages ?? [];
-        if (msgs.length === 0) return;
+        console.log(`[history] Got ${msgs.length} messages for ${session.id}`);
+        
+        // Mark as loaded BEFORE setting messages to avoid re-triggering from the same effect
         historyLoadedRef.current = true;
+        
+        if (msgs.length === 0) return;
         setMessages(msgs.map(m => ({ id: m.id, role: m.role as "user" | "assistant", content: m.content })));
       } catch (e) { console.warn("Could not load history:", e); }
     };
     loadHistory();
-  }, [session.id, isLoading, isAvailable]);
+  }, [session.id, isAvailable]); // Removed isLoading to prevent re-fetching after every prompt
 
   const [prefsSaveStatus, setPrefsSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [jdSaveStatus, setJdSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
@@ -429,16 +451,105 @@ function ChatArea({ session, updateSession }: { session: ChatSession; updateSess
             />
             <span className="text-[10px] text-slate-500 pr-2">.pdf</span>
           </div>
-          <a
-            href={`http://localhost:8000/download-resume?threadId=${session.id}${session.pdfFilename ? `&filename=${encodeURIComponent(session.pdfFilename)}` : ""}`}
-            download={session.pdfFilename ? (session.pdfFilename.toLowerCase().endsWith(".pdf") ? session.pdfFilename : `${session.pdfFilename}.pdf`) : "resume.pdf"}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs py-1.5 px-3 rounded transition-colors duration-200 shadow flex items-center gap-1.5 font-medium whitespace-nowrap"
+          {/* Download PDF button */}
+          <button
+            id="download-pdf-btn"
+            onClick={async () => {
+              setIsDownloadingPdf(true);
+              setDownloadError(null);
+              try {
+                const filename = session.pdfFilename || "resume";
+                const url = `/api/resume/download?threadId=${session.id}&format=pdf&filename=${encodeURIComponent(filename)}`;
+                const res = await fetch(url);
+                if (!res.ok) {
+                  const err = await res.json().catch(() => ({ error: res.statusText }));
+                  setDownloadError(err.error || "Download failed");
+                  return;
+                }
+                const blob = await res.blob();
+                const link = document.createElement("a");
+                link.href = URL.createObjectURL(blob);
+                const safeName = filename.endsWith(".pdf") ? filename : `${filename}.pdf`;
+                link.download = safeName;
+                link.click();
+                URL.revokeObjectURL(link.href);
+              } catch (e: unknown) {
+                setDownloadError(e instanceof Error ? e.message : "Download failed");
+              } finally {
+                setIsDownloadingPdf(false);
+              }
+            }}
+            disabled={isDownloadingPdf || isDownloadingTex}
+            className={`relative flex items-center gap-1.5 text-white text-xs py-1.5 px-3 rounded transition-all duration-200 shadow font-medium whitespace-nowrap ${isDownloadingPdf
+                ? "bg-emerald-700 cursor-wait"
+                : "bg-emerald-600 hover:bg-emerald-500"
+              }`}
           >
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-            PDF
-          </a>
+            {isDownloadingPdf ? (
+              <>
+                <svg className="animate-spin" xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                </svg>
+                Compiling...
+              </>
+            ) : (
+              <>
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
+                PDF
+              </>
+            )}
+          </button>
+
+          {/* Download LaTeX button */}
+          <button
+            id="download-tex-btn"
+            onClick={async () => {
+              setIsDownloadingTex(true);
+              setDownloadError(null);
+              try {
+                const filename = session.pdfFilename || "resume";
+                const url = `/api/resume/download?threadId=${session.id}&format=tex&filename=${encodeURIComponent(filename)}`;
+                const res = await fetch(url);
+                if (!res.ok) {
+                  const err = await res.json().catch(() => ({ error: res.statusText }));
+                  setDownloadError(err.error || "Download failed");
+                  return;
+                }
+                const blob = await res.blob();
+                const link = document.createElement("a");
+                link.href = URL.createObjectURL(blob);
+                const safeName = filename.endsWith(".tex") ? filename : `${filename}.tex`;
+                link.download = safeName;
+                link.click();
+                URL.revokeObjectURL(link.href);
+              } catch (e: unknown) {
+                setDownloadError(e instanceof Error ? e.message : "Download failed");
+              } finally {
+                setIsDownloadingTex(false);
+              }
+            }}
+            disabled={isDownloadingPdf || isDownloadingTex}
+            className={`flex items-center gap-1.5 text-white text-xs py-1.5 px-3 rounded transition-all duration-200 shadow font-medium whitespace-nowrap ${isDownloadingTex
+                ? "bg-violet-700 cursor-wait"
+                : "bg-violet-600 hover:bg-violet-500"
+              }`}
+          >
+            {isDownloadingTex ? (
+              <>
+                <svg className="animate-spin" xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                </svg>
+                Fetching...
+              </>
+            ) : (
+              <>
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
+                LaTeX
+              </>
+            )}
+          </button>
           <button
             onClick={() => setShowPrefs(!showPrefs)}
             className="bg-amber-600 hover:bg-amber-500 text-white text-xs py-1.5 px-3 rounded transition-colors duration-200 shadow font-medium"
@@ -453,6 +564,14 @@ function ChatArea({ session, updateSession }: { session: ChatSession; updateSess
           </button>
         </div>
       </div>
+
+      {/* Download error banner */}
+      {downloadError && (
+        <div className="bg-red-900/80 border-b border-red-700 px-4 py-2 flex items-center justify-between shrink-0">
+          <span className="text-red-300 text-xs">⚠ {downloadError}</span>
+          <button onClick={() => setDownloadError(null)} className="text-red-400 hover:text-red-200 text-xs ml-3">✕</button>
+        </div>
+      )}
 
       {/* Section Preferences Panel */}
       {showPrefs && (
@@ -556,16 +675,32 @@ export default function Dashboard() {
   const [showSettings, setShowSettings] = useState(false);
   const [isCreatingChat, setIsCreatingChat] = useState(false);
   const [isLoadingSessions, setIsLoadingSessions] = useState(true);
+  const [hasMasterProfile, setHasMasterProfile] = useState<boolean | null>(null);
   const initialized = useRef(false);
   const creatingRef = useRef(false);
+  const redirectingRef = useRef(false);
 
   useEffect(() => {
     setIsMounted(true);
     if (initialized.current) return;
     initialized.current = true;
 
-    const fetchChats = async () => {
+    const init = async () => {
       try {
+        // 1. Check user profile status
+        const userRes = await fetch("/api/user");
+        if (userRes.ok) {
+          const userData = await userRes.json();
+          setHasMasterProfile(userData.hasMasterProfile);
+          if (!userData.hasMasterProfile) {
+            alert("Please fill in your Master Profile before using the builder! Redirecting...");
+            redirectingRef.current = true;
+            router.push("/profile");
+            return;
+          }
+        }
+
+        // 2. Fetch chats
         const res = await fetch("/api/chats");
         if (res.ok) {
           const loadedSessions = await res.json();
@@ -582,10 +717,13 @@ export default function Dashboard() {
             setCurrentSessionId(uniqueSessions[0].id);
           }
         }
-      } catch (e) { console.error("Failed to load sessions", e); }
-      finally { setIsLoadingSessions(false); }
+      } catch (e) {
+        console.error("Failed to initialize dashboard", e);
+      } finally {
+        setIsLoadingSessions(false);
+      }
     };
-    fetchChats();
+    init();
   }, []);
 
   const createNewChatInternal = async (id: string, title: string) => {
@@ -616,6 +754,7 @@ export default function Dashboard() {
         if (data.error === "MISSING_MASTER_PROFILE") {
           alert("Please fill in your Master Profile before creating a chat! Redirecting...");
           setSessions(prev => prev.filter(s => s.id !== id));
+          redirectingRef.current = true;
           router.push("/profile");
         }
       }
@@ -664,10 +803,10 @@ export default function Dashboard() {
   }, [sessions, currentSessionId]);
 
   useEffect(() => {
-    if (isMounted && initialized.current && !isLoadingSessions && sessions.length === 0 && !isCreatingChat && !creatingRef.current) {
+    if (isMounted && initialized.current && !isLoadingSessions && sessions.length === 0 && !isCreatingChat && !creatingRef.current && hasMasterProfile === true && !redirectingRef.current) {
       createNewChat();
     }
-  }, [sessions.length, isMounted, isCreatingChat, isLoadingSessions]);
+  }, [sessions.length, isMounted, isCreatingChat, isLoadingSessions, hasMasterProfile]);
 
   const startEditing = (id: string, title: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -793,6 +932,7 @@ export default function Dashboard() {
             runtimeUrl="/api/copilotkit"
             agent="resume_builder_agent"
             threadId={currentSessionId}
+            properties={{ threadId: currentSessionId }}
             showDevConsole={true}
             onError={(event) => {
               console.error("[CopilotKit] RUN_ERROR:", event);

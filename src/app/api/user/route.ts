@@ -23,10 +23,13 @@ export async function GET() {
 
     const user = await prisma.user.findUnique({
       where: { email: session.user.email },
-      select: { templateKey: true }
+      select: { templateKey: true, masterProfile: true }
     });
 
-    return NextResponse.json({ templateKey: user?.templateKey || null });
+    return NextResponse.json({ 
+      templateKey: user?.templateKey || null,
+      hasMasterProfile: !!user?.masterProfile
+    });
   } catch (error) {
     console.error("GET /api/user error:", error);
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
@@ -48,12 +51,11 @@ export async function POST(req: NextRequest) {
       select: { templateKey: true }
     });
 
-    // Delete old template from S3 if different
+    // Delete old template from Storage Service if different
     if (currentUser?.templateKey && currentUser.templateKey !== templateKey) {
       try {
-        const { deleteS3Object } = await import("@/lib/s3");
-        const BUCKET_NAME = process.env.S3_BUCKET || "resume_agent_bucket";
-        await deleteS3Object(BUCKET_NAME, currentUser.templateKey);
+        const { storageClient } = await import("@/lib/storage-client");
+        await storageClient.delete(currentUser.templateKey);
       } catch (e) {
         console.warn("Failed to delete old template:", e);
       }

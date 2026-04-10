@@ -52,3 +52,9 @@ bun.lockb
 agent/venv/
 agent/__pycache__/
 agent/.venv/
+
+**/*.db
+agent/sessions.db
+prisma/dev.db
+
+*.lock

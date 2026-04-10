@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { PrismaClient } from "@prisma/client";
 import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3";
-import { s3Client, deleteS3Object } from "@/lib/s3";
-import { GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
+import { storageClient } from "@/lib/storage-client";
 
 const BUCKET_NAME = process.env.S3_BUCKET || "resume_agent_bucket";
 const globalForPrisma = global as unknown as { prisma: PrismaClient };
@@ -29,19 +28,16 @@ export async function GET(req: NextRequest) {
     // Case 1: Proxy streaming a binary PDF
     if (pdfKey) {
       try {
-        const response = await s3Client.send(
-          new GetObjectCommand({ Bucket: BUCKET_NAME, Key: pdfKey })
-        );
-        const body = await response.Body?.transformToByteArray();
-        if (!body) throw new Error("Empty body");
-        return new NextResponse(body as any, {
+        const response = await storageClient.download(pdfKey);
+        const bodyArray = await response.arrayBuffer();
+        return new NextResponse(bodyArray as any, {
           headers: {
             "Content-Type": "application/pdf",
             "Content-Disposition": `attachment; filename="resume.pdf"`,
           },
         });
       } catch (error) {
-        console.error(`S3 proxy error for ${pdfKey}:`, error);
+        console.error(`Storage proxy error for ${pdfKey}:`, error);
         return NextResponse.json({ error: "Failed to fetch PDF" }, { status: 404 });
       }
     }
@@ -52,25 +48,22 @@ export async function GET(req: NextRequest) {
 
     const thread = await prisma.chatThread.findUnique({
       where: { id: threadId },
-      include: { user: { select: { masterProfile: true } } },
+      include: { user: { select: { masterProfile: true, templateKey: true } } },
     });
 
     if (!thread) {
       return NextResponse.json({ error: "Thread not found" }, { status: 404 });
     }
 
-    // Fetch the template content from S3
+    // Fetch the template content from Storage Service
     let templateContent: string | null = null;
-    if (thread.templateKey) {
+    const activeTemplateKey = thread.templateKey || thread.user?.templateKey;
+    if (activeTemplateKey) {
       try {
-        const response = await s3Client.send(
-          new GetObjectCommand({ Bucket: BUCKET_NAME, Key: thread.templateKey })
-        );
-        if (response.Body) {
-          templateContent = await response.Body.transformToString();
-        }
+        const response = await storageClient.download(activeTemplateKey);
+        templateContent = await response.text();
       } catch (e) {
-        console.error("Failed to fetch template from S3:", e);
+        console.error("Failed to fetch template from Storage Service:", e);
       }
     }
 
@@ -78,12 +71,14 @@ export async function GET(req: NextRequest) {
       jobDescription: thread.jobDescription || null,
       jobUrl: thread.jobUrl || null,
       tailoredProfile: thread.tailoredProfile || null,
-      templateKey: thread.templateKey || null,
+      templateKey: activeTemplateKey || null,
       templateContent,
       sectionPrefs: thread.sectionPrefs || null,
       masterProfile: thread.user?.masterProfile || null,
       pdfKey: thread.pdfKey || null,
       pdfHash: thread.pdfHash || null,
+      texKey: thread.texKey || null,
+      latexHash: thread.latexHash || null,
       updatedAt: thread.updatedAt,
     });
   } catch (error) {
@@ -106,6 +101,8 @@ export async function POST(req: NextRequest) {
       pdfHash,
       pdfData,
       deleteOldPdfKey,
+      texKey,
+      latexHash,
     } = await req.json();
 
     if (!threadId) {
@@ -126,28 +123,24 @@ export async function POST(req: NextRequest) {
         : JSON.stringify(tailoredProfile);
     }
 
-    // Delete old PDF from S3 before uploading new one (requirement #8)
+    // Delete old PDF from Storage Service before uploading new one
     if (deleteOldPdfKey) {
       try {
-        await deleteS3Object(BUCKET_NAME, deleteOldPdfKey);
+        await storageClient.delete(deleteOldPdfKey);
         console.log(`[context] Deleted old PDF: ${deleteOldPdfKey}`);
       } catch (e) {
         console.warn(`[context] Failed to delete old PDF ${deleteOldPdfKey}:`, e);
       }
     }
 
-    // Upload new PDF to S3
+    // Upload new PDF to Storage Service
     if (pdfData && pdfKey) {
-      const buffer = Buffer.from(pdfData, "base64");
-      await s3Client.send(
-        new PutObjectCommand({
-          Bucket: BUCKET_NAME,
-          Key: pdfKey,
-          Body: buffer,
-          ContentType: "application/pdf",
-        })
-      );
+      await storageClient.uploadBase64(pdfKey, pdfData, "application/pdf");
     }
+
+    // Update tex metadata
+    if (texKey) updateData.texKey = texKey;
+    if (latexHash) updateData.latexHash = latexHash;
 
     // Update PDF metadata
     if (pdfKey) updateData.pdfKey = pdfKey;

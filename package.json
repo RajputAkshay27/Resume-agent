@@ -15,7 +15,6 @@
   },
   "dependencies": {
     "@ag-ui/client": "^0.0.51",
-    "@aws-sdk/client-s3": "^3.1023.0",
     "@copilotkit/react-core": "^1.54.1",
     "@copilotkit/react-ui": "^1.54.1",
     "@copilotkit/runtime": "^1.54.1",

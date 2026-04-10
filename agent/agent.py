@@ -57,7 +57,7 @@ def create_agent():
 
     # --- Tools ------------------------------------------------------------
     from tools import (
-        render_and_compile,
+        render_latex,
         read_state,
         get_all_context,
         submit_tailored_resume,
@@ -112,38 +112,39 @@ You are an expert resume tailoring engine. Your task is to produce a structured 
         tools=[get_all_context, submit_tailored_resume],
     )
 
-    # --- Sub-Agent: Compilation Agent ------------------------------------
+    # --- Sub-Agent: LaTeX Rendering Agent -----------------------------------
     compilation_agent = Agent(
         model=gemma_brain,
         name="compilation_agent",
         description=(
-            "A specialist sub-agent for rendering and compiling the final PDF ONLY. "
-            "Delegate to this agent ONLY when the content is finalized and the user "
-            "wants to produce a PDF. Do NOT use this agent for content updates or "
-            "tailoring. It renders the Jinja2 LaTeX template and compiles to PDF."
+            "A specialist sub-agent for rendering the final LaTeX resume ONLY. "
+            "Delegate to this agent when the content is finalized and the user wants "
+            "to prepare the resume for download. It renders the Jinja2 LaTeX template "
+            "and stores the .tex file — PDF compilation happens automatically when the "
+            "user clicks the Download PDF button."
         ),
         instruction="""\
-You are a resume compilation specialist. Your ONLY job is to produce the final PDF.
+You are a LaTeX rendering specialist. Your ONLY job is to render the resume to LaTeX.
 
 ## Workflow
 1. Call `read_state` first to verify that `tailored_resume` is present in state.
    - If `tailored_resume` is missing or null, respond:
      "Tailored resume data is not in state. Tailoring must be run first."
-     Do NOT call `render_and_compile`. Return immediately.
+     Do NOT call `render_latex`. Return immediately.
    - If `tailored_resume` is present, proceed.
-2. Call `render_and_compile` to render the Jinja2 template and compile to PDF.
-3. Report the result: success with the PDF key, or any errors.
+2. Call `render_latex` to render the Jinja2 template and store the .tex file.
+3. Report the result: success with the hash, or any errors.
 
 ## Constraints
 - You do NOT modify any content or template.
+- You do NOT compile PDFs — that happens automatically when the user downloads.
 - You ONLY call the tools and report results.
-- The render/compile tool handles template validation, rendering, LaTeX escaping, and PDF upload.
-- If compilation fails, report the error with details.
+- If rendering fails, report the error with details.
 """,
         generate_content_config=types.GenerateContentConfig(
             temperature=0.1,
         ),
-        tools=[read_state, render_and_compile],
+        tools=[read_state, render_latex],
     )
 
     # --- Root Agent: Orchestrator ----------------------------------------
@@ -184,24 +185,20 @@ ADK will automatically place the result securely into state.
 
 **CRITICAL — After delegation, ALWAYS call `read_state` to verify the result.**
 If `tailored_resume` is present in state, generation succeeded.
-If `tailored_resume` is absent or state shows an error, tell the user:
-"Tailoring failed — please try again. If the issue persists, it may be a rate limit."
-Do NOT proceed to PDF compilation if `tailored_resume` is missing.
-
-### 3. Review & Present Results
-After verifying `tailored_resume` is in state, tell the user:
 - How many experiences, projects, achievements were selected
 - Key highlights from the tailored summary
-- Ask if they want to review or adjust anything
+- Ask if they want to review or adjust anything or you can compile the resume
 
-### 4. Compile PDF via Sub-Agent
-When the user specifically says "Compile PDF", "Looks good", "Generate PDF", or "Download":
+If not present tell user to retry
+
+### 4. Render LaTeX via Sub-Agent
+When the user specifically says "Compile PDF", "Looks good", "Generate PDF", "Download", or "Prepare my resume":
 1. FIRST call `read_state` to verify `tailored_resume` is present in state.
    - If it is missing: do NOT delegate to `compilation_agent`. Instead, tell the user
      "I need to generate your tailored resume first" and delegate to `tailoring_agent`.
    - If it is present: proceed to step 2.
-2. Delegate to `compilation_agent` to render the template and compile.
-3. Tell the user the PDF is ready for download from the header button.
+2. Delegate to `compilation_agent` to render the Jinja2 template and store the .tex.
+3. Tell the user the resume is ready — they can click **Download PDF** or **Download LaTeX** from the header.
 
 ### 5. Iterate & Update
 If the user wants ANY changes to the content (e.g., "update the summary", "change the bullet points", "more/less detail"):

@@ -1,13 +1,8 @@
 """
-Jinja2 LaTeX Template Bridge for the Resume Agent.
+latex_bridge.py — Jinja2 LaTeX Template Rendering + PDF Compilation
+for the Resume Compilation Service.
 
-Handles:
-- LaTeX special character escaping
-- Bold marker conversion (**text** → \\textbf{text})
-- Dual delimiter support (standard {{ }} and LaTeX-safe \\VAR{})
-- Template validation
-- Template rendering with Pydantic data
-- PDF compilation via pdflatex
+Mirrors agent/latex_bridge.py, but without the agent-specific imports.
 """
 
 import os
@@ -18,8 +13,6 @@ import logging
 from typing import Any
 
 import jinja2
-
-from schemas import TailoredResume
 
 logger = logging.getLogger(__name__)
 
@@ -41,19 +34,13 @@ _LATEX_SPECIAL_CHARS = {
     "\\": r"\textbackslash{}",
 }
 
-# Regex: match any single LaTeX special char
 _LATEX_ESCAPE_RE = re.compile(
     "|".join(re.escape(c) for c in _LATEX_SPECIAL_CHARS)
 )
 
 
 def escape_latex(text: str) -> str:
-    """Escape LaTeX special characters in a string.
-
-    Handles: & % $ # _ { } ~ ^
-    Backslash is NOT escaped here because the Jinja2 template itself
-    may contain intentional LaTeX commands.
-    """
+    """Escape LaTeX special characters in a string."""
     if not text:
         return text
     return _LATEX_ESCAPE_RE.sub(lambda m: _LATEX_SPECIAL_CHARS[m.group()], text)
@@ -84,11 +71,7 @@ _STANDARD_BLOCK_RE = re.compile(r"\{%")
 
 
 def detect_delimiter_style(template_content: str) -> str:
-    """Auto-detect whether the template uses standard or LaTeX-safe delimiters.
-
-    Returns:
-        'latex_safe' if \\VAR{} / \\BLOCK{} are found, else 'standard'.
-    """
+    """Auto-detect whether the template uses standard or LaTeX-safe delimiters."""
     latex_safe_count = (
         len(_LATEX_SAFE_VAR_RE.findall(template_content))
         + len(_LATEX_SAFE_BLOCK_RE.findall(template_content))
@@ -97,15 +80,13 @@ def detect_delimiter_style(template_content: str) -> str:
         len(_STANDARD_VAR_RE.findall(template_content))
         + len(_STANDARD_BLOCK_RE.findall(template_content))
     )
-
     if latex_safe_count > standard_count:
         return "latex_safe"
     return "standard"
 
 
 class _SilentUndefined(jinja2.Undefined):
-    """An Undefined that renders as empty string instead of raising.
-    This prevents crashes when an optional field is missing from the data."""
+    """Renders as empty string instead of raising."""
     def __str__(self):
         return ""
     def __iter__(self):
@@ -115,11 +96,7 @@ class _SilentUndefined(jinja2.Undefined):
 
 
 def create_jinja_env(style: str) -> jinja2.Environment:
-    """Create a Jinja2 Environment with the appropriate delimiters.
-
-    Args:
-        style: 'standard' for {{ }}/{% %}, 'latex_safe' for \\VAR{}/\\BLOCK{}.
-    """
+    """Create a Jinja2 Environment with the appropriate delimiters."""
     if style == "latex_safe":
         return jinja2.Environment(
             block_start_string=r"\BLOCK{",
@@ -143,93 +120,11 @@ def create_jinja_env(style: str) -> jinja2.Environment:
 
 
 # ---------------------------------------------------------------------------
-# Template validation
-# ---------------------------------------------------------------------------
-
-# Known fields from the TailoredResume schema
-_KNOWN_VARIABLES = {
-    "name", "email", "phone", "linkedin", "github", "website",
-    "summary", "experience", "education", "skills",
-    "projects", "achievements", "certifications",
-}
-
-
-def validate_template(template_content: str) -> dict:
-    """Validate a Jinja2 LaTeX template.
-
-    Returns a dict with:
-        valid (bool): Whether the template is usable.
-        errors (list[str]): Critical problems.
-        warnings (list[str]): Non-critical observations.
-        style (str): Detected delimiter style.
-        variables_found (list[str]): Variable names referenced in the template.
-    """
-    result: dict[str, Any] = {
-        "valid": True,
-        "errors": [],
-        "warnings": [],
-        "style": "unknown",
-        "variables_found": [],
-    }
-
-    # 1. Detect delimiter style
-    style = detect_delimiter_style(template_content)
-    result["style"] = style
-
-    # 2. Try to parse
-    env = create_jinja_env(style)
-    try:
-        parsed = env.parse(template_content)
-    except jinja2.TemplateSyntaxError as exc:
-        result["valid"] = False
-        result["errors"].append(f"Jinja2 syntax error at line {exc.lineno}: {exc.message}")
-        return result
-
-    # 3. Extract referenced variable names
-    referenced_vars: set[str] = set()
-    for node in parsed.find_all(jinja2.nodes.Name):
-        referenced_vars.add(node.name)
-
-    result["variables_found"] = sorted(referenced_vars)
-
-    # 4. Cross-reference against known schema
-    missing = _KNOWN_VARIABLES - referenced_vars
-    unknown = referenced_vars - _KNOWN_VARIABLES
-    # Filter out common Jinja2 loop variables
-    loop_vars = {"loop", "item", "exp", "proj", "edu", "cat", "skill_list",
-                 "ach", "cert", "bullet", "highlight", "category", "skills_list"}
-    unknown = unknown - loop_vars
-
-    if "name" not in referenced_vars:
-        result["errors"].append("Template does not reference 'name' — this is required.")
-        result["valid"] = False
-
-    if missing:
-        result["warnings"].append(
-            f"Template does not use these schema fields: {', '.join(sorted(missing))}. "
-            f"Those sections will be ignored."
-        )
-
-    if unknown:
-        result["warnings"].append(
-            f"Template references unknown variables: {', '.join(sorted(unknown))}. "
-            f"These will cause errors at render time."
-        )
-
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Data preparation helpers
+# Data preparation
 # ---------------------------------------------------------------------------
 
 def _escape_value(value: Any, escape_keys: bool = False) -> Any:
-    """Recursively escape LaTeX special characters in all string values.
-    
-    Args:
-        value: The data to escape.
-        escape_keys: If True, dictionary keys will also be escaped.
-    """
+    """Recursively escape LaTeX special characters in all string values."""
     if isinstance(value, str):
         escaped = escape_latex(value)
         return process_bold_markers(escaped)
@@ -244,11 +139,7 @@ def _escape_value(value: Any, escape_keys: bool = False) -> Any:
 
 
 def _strip_url_protocol(url: str) -> str:
-    """Strip https:// or http:// prefix from a URL.
-
-    The LaTeX template already wraps links in \\href{https://...},
-    so the data must be a bare host+path like 'github.com/user'.
-    """
+    """Strip https:// or http:// prefix from a URL."""
     if not url:
         return url
     for prefix in ("https://", "http://"):
@@ -257,32 +148,26 @@ def _strip_url_protocol(url: str) -> str:
     return url
 
 
-def _prepare_template_data(tailored_data: TailoredResume) -> dict:
-    """Convert a TailoredResume to a dict suitable for Jinja2 rendering.
-    """
-    raw = tailored_data.model_dump()
-
-    # Normalize link fields: strip protocol prefix to avoid double https://
+def _prepare_template_data(raw: dict) -> dict:
+    """Convert a raw dictionary to a dict suitable for Jinja2 rendering."""
+    # Ensure raw is a dict and make a shallow copy at least to avoid mutating the original
+    raw = dict(raw)
+    
     for link_field in ("github", "linkedin", "website"):
         if raw.get(link_field):
             raw[link_field] = _strip_url_protocol(raw[link_field])
 
-    # Escape all values, but only escape keys inside the 'skills' dictionary
-    # because those are rendered as text in the LaTeX table.
     escaped = {}
     for k, v in raw.items():
         if k == "skills" and isinstance(v, dict):
-            # The LLM often generates keys with underscores (e.g. Cloud_Platforms).
-            # We replace them with spaces for better display in the resume.
             clean_skills = {cat.replace("_", " "): items for cat, items in v.items()}
             escaped[k] = _escape_value(clean_skills, escape_keys=True)
         else:
             escaped[k] = _escape_value(v, escape_keys=False)
 
-    # Set safe defaults for None values so the template never crashes
     for key, value in escaped.items():
         if value is None:
-            escaped[key] = ""   # \BLOCK{if field} will be falsy for ""
+            escaped[key] = ""
 
     return escaped
 
@@ -291,28 +176,21 @@ def _prepare_template_data(tailored_data: TailoredResume) -> dict:
 # Template rendering
 # ---------------------------------------------------------------------------
 
-def render_resume(template_content: str, tailored_data: TailoredResume) -> str:
+def render_resume(template_content: str, tailored_data: dict) -> str:
     """Render a Jinja2 LaTeX template with tailored resume data.
-
-    Args:
-        template_content: The raw Jinja2 .tex template string.
-        tailored_data: The validated TailoredResume Pydantic object.
 
     Returns:
         The final .tex string ready for pdflatex compilation.
     """
     style = detect_delimiter_style(template_content)
     env = create_jinja_env(style)
-
     template = env.from_string(template_content)
     data = _prepare_template_data(tailored_data)
 
-    # DEBUG: Print exact keys and value types being passed to Jinja2
     debug_info = {k: (len(v) if isinstance(v, (str, list, dict)) else v) for k, v in data.items()}
     logger.info("RENDER_RESUME: Passing data to Jinja2: %s", debug_info)
 
-    rendered = template.render(**data)
-    return rendered
+    return template.render(**data)
 
 
 # ---------------------------------------------------------------------------
@@ -321,10 +199,6 @@ def render_resume(template_content: str, tailored_data: TailoredResume) -> str:
 
 def compile_pdf(tex_content: str, output_dir: str | None = None) -> str:
     """Compile a .tex string to PDF using pdflatex.
-
-    Args:
-        tex_content: The complete LaTeX source.
-        output_dir: Directory to write files in. If None, a temp dir is created.
 
     Returns:
         Absolute path to the generated PDF file.
@@ -338,12 +212,11 @@ def compile_pdf(tex_content: str, output_dir: str | None = None) -> str:
     tex_path = os.path.join(output_dir, "resume.tex")
     pdf_path = os.path.join(output_dir, "resume.pdf")
 
-    # Write .tex file (use newline="" to prevent CRLF issues on Windows)
     with open(tex_path, "w", encoding="utf-8", newline="") as f:
         f.write(tex_content)
 
-    # Run pdflatex 3 times for full convergence
-    for i in range(3):
+    process = None
+    for _ in range(3):
         process = subprocess.run(
             [
                 "pdflatex",

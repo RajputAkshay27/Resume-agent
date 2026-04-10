@@ -73,9 +73,9 @@ class Education(BaseModel):
     institution: str
     degree: str
     field: Optional[str] = None
-    start_date: Optional[str] = None
-    end_date: Optional[str] = None
-    gpa: Optional[str] = None
+    start_date: str
+    end_date: str
+    gpa: str
     highlights: list[str] = Field(default_factory=list)
 
 

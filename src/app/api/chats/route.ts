@@ -3,7 +3,7 @@ import { getServerSession } from "next-auth/next";
 import { PrismaClient } from "@prisma/client";
 import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3";
 import { authOptions } from "../auth/[...nextauth]/route";
-import { copyS3Object, deleteS3Object, ensureBucketExists } from "@/lib/s3";
+import { storageClient } from "@/lib/storage-client";
 
 const BUCKET_NAME = process.env.S3_BUCKET || "resume_agent_bucket";
 
@@ -80,10 +80,9 @@ export async function POST(req: Request) {
       let finalTemplateKey: string | null = null;
 
       if (user.templateKey) {
-        await ensureBucketExists(BUCKET_NAME);
         const threadTemplateKey = `${user.email}/${id}-template.tex`;
         try {
-          await copyS3Object(BUCKET_NAME, user.templateKey, threadTemplateKey);
+          await storageClient.copy(user.templateKey, threadTemplateKey);
           finalTemplateKey = threadTemplateKey;
         } catch (e) {
           console.error("Failed to copy template:", e);
@@ -143,16 +142,16 @@ export async function DELETE(req: Request) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
     }
 
-    // Cleanup S3
+    // Cleanup Storage Service
     try {
       if (thread.templateKey) {
-        await deleteS3Object(BUCKET_NAME, thread.templateKey);
+        await storageClient.delete(thread.templateKey);
       }
       if (thread.pdfKey) {
-        await deleteS3Object(BUCKET_NAME, thread.pdfKey);
+        await storageClient.delete(thread.pdfKey);
       }
     } catch (e) {
-      console.warn(`Failed to cleanup S3 objects for thread ${id}:`, e);
+      console.warn(`Failed to cleanup storage objects for thread ${id}:`, e);
     }
 
     await prisma.chatThread.delete({ where: { id } });

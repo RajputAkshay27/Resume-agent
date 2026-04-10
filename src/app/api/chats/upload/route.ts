@@ -3,10 +3,7 @@ import { getServerSession } from "next-auth/next";
 import { PrismaClient } from "@prisma/client";
 import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3";
 import { authOptions } from "../../auth/[...nextauth]/route";
-import { s3Client, ensureBucketExists } from "@/lib/s3";
-import { PutObjectCommand } from "@aws-sdk/client-s3";
-
-const BUCKET_NAME = process.env.S3_BUCKET || "resume_agent_bucket";
+import { storageClient } from "@/lib/storage-client";
 
 const globalForPrisma = global as unknown as { prisma: PrismaClient };
 let prisma = globalForPrisma.prisma;
@@ -42,27 +39,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Unauthorized or thread not found" }, { status: 403 });
     }
 
-    // Ensure bucket exists
-    await ensureBucketExists(BUCKET_NAME);
-
-    // Convert file to buffer
-    const arrayBuffer = await file.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-
     // Create unique key specific to this thread
     const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
     const originalName = file.name || "template.tex";
     const objectKey = `${session.user.email}/${threadId}-${uniqueSuffix}-${originalName}`;
 
-    // Upload to S3
-    await s3Client.send(
-      new PutObjectCommand({
-        Bucket: BUCKET_NAME,
-        Key: objectKey,
-        Body: buffer,
-        ContentType: file.type || "application/x-tex",
-      })
-    );
+    // Upload to Storage Service
+    await storageClient.upload(file, objectKey);
 
     // Update the thread record
     await prisma.chatThread.update({

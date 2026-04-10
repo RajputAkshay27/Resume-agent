@@ -1,11 +1,41 @@
 services:
+  storage:
+    build:
+      context: .
+      dockerfile: storage/Dockerfile
+    ports:
+      - "8001:8001"
+    env_file:
+      - .env
+    environment:
+      - FRONTEND_URL=http://frontend:3000
+      - BACKEND_URL=http://backend:8000
+    volumes:
+      - storage_data:/app/storage
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - FRONTEND_URL=http://frontend:3000
+      - STORAGE_SERVICE_URL=http://storage:8001
+    volumes:
+      - agent_data:/app/agent
+      - /app/agent/.venv
+    depends_on:
+      - storage
+
   frontend:
     build:
       context: .
       dockerfile: Dockerfile.frontend
     ports:
       - "3000:3000"
-    # Load all variables directly from .env
     env_file:
       - .env
     environment:
@@ -14,26 +44,14 @@ services:
       - AGENT_URL=http://backend:8000
       - NEXT_PUBLIC_AGENT_URL=http://localhost:8000
       - DATABASE_URL=file:/app/data/dev.db
+      - STORAGE_SERVICE_URL=http://storage:8001
     volumes:
       - frontend_data:/app/data
     depends_on:
       - backend
-
-  backend:
-    build:
-      context: .
-      dockerfile: Dockerfile.backend
-    ports:
-      - "8000:8000"
-    # Load all variables directly from .env
-    env_file:
-      - .env
-    environment:
-      - FRONTEND_URL=http://frontend:3000
-    volumes:
-      - agent_data:/app/agent
-      - /app/agent/.venv  # Protect venv from volume overwriting
+      - storage
 
 volumes:
   frontend_data:
   agent_data:
+  storage_data:

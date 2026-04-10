@@ -1,0 +1,18 @@
+[project]
+name = "storage-service"
+version = "0.1.0"
+description = "Microservice for S3/Garage storage operations"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "boto3",
+    "python-multipart",
+    "python-dotenv",
+    "pydantic",
+]
+
+[tool.uv]
+managed = true
+dev-dependencies = []

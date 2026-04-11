@@ -22,7 +22,8 @@ class StorageClient {
     // Sanitize URL: remove potential quotes from .env and ensure protocol
     const sanitizedUrl = url.replace(/['"]/g, "").trim();
     this.url = sanitizedUrl.startsWith("http") ? sanitizedUrl : `http://${sanitizedUrl}`;
-    this.apiKey = apiKey;
+    // Sanitize API key: remove potential quotes from .env
+    this.apiKey = apiKey.replace(/['"]/g, "").trim();
   }
 
   private async request(path: string, options: RequestInit = {}) {

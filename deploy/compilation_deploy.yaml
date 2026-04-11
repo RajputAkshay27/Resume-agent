@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: compilation
+  namespace: resume-agent
+  labels:
+    app: compilation
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: compilation
+  template:
+    metadata:
+      labels:
+        app: compilation
+    spec:
+      containers:
+      - name: compilation
+        image: latex:v0.1
+        ports:
+        - containerPort: 8002
+        env:
+        - name: STORAGE_SERVICE_URL
+          value: "http://storage-service.resume-agent.svc.cluster.local:8001"
+        - name: INTERNAL_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: storage-s3-secret
+              key: INTERNAL_API_KEY
+        - name: FRONTEND_URL
+          value: "http://localhost:3000"
+        - name: BACKEND_URL
+          value: "http://localhost:8000"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: compilation-service
+  namespace: resume-agent
+spec:
+  selector:
+    app: compilation
+  ports:
+    - protocol: TCP
+      port: 8002
+      targetPort: 8002
+  type: ClusterIP

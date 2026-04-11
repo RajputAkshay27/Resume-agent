@@ -4,10 +4,10 @@ FROM python:3.12-slim AS builder
 # Install uv for dependency management
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-WORKDIR /app/storage
+WORKDIR /app/agent
 
 # Copy dependency files
-COPY storage/pyproject.toml storage/uv.lock ./
+COPY agent/pyproject.toml agent/uv.lock ./
 
 # Install dependencies into a virtual environment
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -16,16 +16,16 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # --- Stage 2: Final ---
 FROM python:3.12-slim AS runner
 
-WORKDIR /app/storage
+WORKDIR /app/agent
 
 # Copy virtual environment and source code
-COPY --from=builder /app/storage/.venv /app/storage/.venv
-COPY storage/ .
+COPY --from=builder /app/agent/.venv /app/agent/.venv
+COPY agent/ .
 
 # Ensure the venv is in the PATH
-ENV PATH="/app/storage/.venv/bin:$PATH"
+ENV PATH="/app/agent/.venv/bin:$PATH"
 ENV PYTHONUNBUFFERED=1
 
-EXPOSE 8001
+EXPOSE 8000
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001"]
+CMD ["python", "main.py"]

@@ -31,6 +31,7 @@ INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "default_secret_key_change_me")
 # CORS Configuration
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
+LATEX_BACKEND_URL = os.getenv("LATEX_BACKEND_URL", "http://localhost:8002")
 
 # --- Lifespan Events ---
 @asynccontextmanager
@@ -56,7 +57,7 @@ app = FastAPI(title="Storage Service", version="1.0.0", lifespan=lifespan)
 # Allow requests only from Frontend and Backend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL, BACKEND_URL],
+    allow_origins=[FRONTEND_URL, BACKEND_URL, LATEX_BACKEND_URL],
     allow_credentials=True,
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],

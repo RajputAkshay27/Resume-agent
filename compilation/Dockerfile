@@ -1,19 +1,25 @@
-# --- Stage 1: Build Python Agent ---
+# --- Stage 1: Build ---
 FROM python:3.12-slim AS builder
+
+# Install uv for dependency management
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
-WORKDIR /app/agent
-COPY agent/pyproject.toml agent/uv.lock ./
-# Use cache mount for uv dependencies
+
+WORKDIR /app/compilation
+
+# Copy dependency files
+COPY compilation/pyproject.toml compilation/uv.lock ./
+
+# Install dependencies into a virtual environment
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-install-project
 
-# --- Stage 2: Final Production Image ---
+# --- Stage 2: Final ---
 FROM python:3.12-slim AS runner
 
 # Set non-interactive to avoid debconf warnings
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install LaTeX (will be cached)
+# Install LaTeX and other dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
@@ -25,17 +31,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy uv binary directly from the official image
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+WORKDIR /app/compilation
 
-WORKDIR /app/agent
+# Copy virtual environment and source code
+COPY --from=builder /app/compilation/.venv /app/compilation/.venv
+COPY compilation/ .
 
-# Copy agent code and virtual environment
-COPY --from=builder /app/agent/.venv /app/agent/.venv
-COPY agent/ /app/agent/
+# Ensure the venv is in the PATH
+ENV PATH="/app/compilation/.venv/bin:$PATH"
+ENV PYTHONUNBUFFERED=1
 
-# Ensure we use the venv python
-ENV PATH="/app/agent/.venv/bin:$PATH"
+EXPOSE 8002
 
-EXPOSE 8000
 CMD ["python", "main.py"]

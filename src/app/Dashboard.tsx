@@ -351,42 +351,61 @@ function ChatArea({ session, updateSession }: { session: ChatSession; updateSess
     }
   }, [messages.length, session.id, session.title, isLoading, isAvailable]);
 
-  const pendingHistoryRef = useRef<{ id: string; role: string; content: string }[] | null>(null);
+  const [historicalMessages, setHistoricalMessages] = useState<any[] | null>(null);
 
-  // 1. Reset historyLoadedRef specifically when the session ID changes
+  // 1. Reset specifically when the session ID changes
   useEffect(() => {
     historyLoadedRef.current = false;
-    pendingHistoryRef.current = null;
+    setHistoricalMessages(null); // Clear pending history for new session
   }, [session.id]);
-  
-  // 2. Fetch history only if it hasn't been loaded for this session
-  useEffect(() => {
-    if (historyLoadedRef.current) return;
-    
-    // We only proceed if CopilotKit is ready
-    if (!isAvailable) return;
 
-    const loadHistory = async () => {
+  // 2. Fetch history immediately when session.id changes (don't wait for isAvailable)
+  useEffect(() => {
+    const fetchHistory = async () => {
       try {
-        console.log(`[history] Fetching history for ${session.id}`);
+        console.log(`[history] ⚡ Fetching history for ${session.id} (available=${isAvailable})`);
         const res = await fetch(`http://localhost:8000/history?threadId=${session.id}`);
         if (!res.ok) {
           console.warn(`[history] Backend returned ${res.status}`);
           return;
         }
         const data = await res.json();
-        const msgs: { id: string; role: string; content: string }[] = data.messages ?? [];
-        console.log(`[history] Got ${msgs.length} messages for ${session.id}`);
-        
-        // Mark as loaded BEFORE setting messages to avoid re-triggering from the same effect
-        historyLoadedRef.current = true;
-        
-        if (msgs.length === 0) return;
-        setMessages(msgs.map(m => ({ id: m.id, role: m.role as "user" | "assistant", content: m.content })));
-      } catch (e) { console.warn("Could not load history:", e); }
+        const msgs = data.messages ?? [];
+        console.log(`[history] ✅ Got ${msgs.length} messages for ${session.id}`);
+        setHistoricalMessages(msgs);
+      } catch (e) {
+        console.warn("[history] Fetch failed:", e);
+      }
     };
-    loadHistory();
-  }, [session.id, isAvailable]); // Removed isLoading to prevent re-fetching after every prompt
+    fetchHistory();
+  }, [session.id]);
+
+  // 3. Synchronize with CopilotKit (Aggressive sync: don't wait for isAvailable)
+  useEffect(() => {
+    if (!historicalMessages || historyLoadedRef.current) return;
+
+    console.log(`[history] 🔄 Attempting to apply ${historicalMessages.length} messages (available=${isAvailable}, currentMsgs=${messages.length})`);
+
+    const applyMessages = () => {
+      // Final guard within the timeout
+      if (historyLoadedRef.current) return;
+      
+      console.log(`[history] 📥 Applying ${historicalMessages.length} messages to store`);
+      historyLoadedRef.current = true;
+      
+      if (historicalMessages.length > 0) {
+        setMessages(historicalMessages.map(m => ({
+          id: m.id,
+          role: m.role as "user" | "assistant",
+          content: m.content,
+        })));
+      }
+    };
+
+    // Use a slightly longer timeout to ensure CopilotKit's internal state is fully settled
+    const timer = setTimeout(applyMessages, 300);
+    return () => clearTimeout(timer);
+  }, [historicalMessages, isAvailable, setMessages]);
 
   const [prefsSaveStatus, setPrefsSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [jdSaveStatus, setJdSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
@@ -481,8 +500,8 @@ function ChatArea({ session, updateSession }: { session: ChatSession; updateSess
             }}
             disabled={isDownloadingPdf || isDownloadingTex}
             className={`relative flex items-center gap-1.5 text-white text-xs py-1.5 px-3 rounded transition-all duration-200 shadow font-medium whitespace-nowrap ${isDownloadingPdf
-                ? "bg-emerald-700 cursor-wait"
-                : "bg-emerald-600 hover:bg-emerald-500"
+              ? "bg-emerald-700 cursor-wait"
+              : "bg-emerald-600 hover:bg-emerald-500"
               }`}
           >
             {isDownloadingPdf ? (
@@ -531,8 +550,8 @@ function ChatArea({ session, updateSession }: { session: ChatSession; updateSess
             }}
             disabled={isDownloadingPdf || isDownloadingTex}
             className={`flex items-center gap-1.5 text-white text-xs py-1.5 px-3 rounded transition-all duration-200 shadow font-medium whitespace-nowrap ${isDownloadingTex
-                ? "bg-violet-700 cursor-wait"
-                : "bg-violet-600 hover:bg-violet-500"
+              ? "bg-violet-700 cursor-wait"
+              : "bg-violet-600 hover:bg-violet-500"
               }`}
           >
             {isDownloadingTex ? (

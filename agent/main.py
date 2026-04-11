@@ -32,6 +32,7 @@ def run():
         adk_agent=agent,
         app_name="resume_builder_agent",
         session_timeout_seconds=3600,
+        cleanup_interval_seconds=360000,
         session_service=session_service,
         use_in_memory_services=False
     )
@@ -76,21 +77,32 @@ def run():
         user_id = f"thread_user_{threadId}"
         print(f"[DEBUG] Fetching history for threadId: {threadId} (user_id: {user_id})")
 
+        # --- SESSION LOGGING START ---
+        # As requested: List all sessions and the number of events in them
+        try:
+            all_sessions_response = await session_service.list_sessions(app_name=AGENT_NAME)
+            all_sessions = all_sessions_response.sessions if all_sessions_response and all_sessions_response.sessions else []
+            print(f"[HISTORY LOG] Database contains {len(all_sessions)} total sessions.")
+            for s in all_sessions:
+                try:
+                    # Get full session to count events
+                    full_session = await session_service.get_session(
+                        app_name=AGENT_NAME, user_id=s.user_id, session_id=s.id
+                    )
+                    event_count = len(getattr(full_session, "events", []) or [])
+                    print(f"[HISTORY LOG] Session: {s.id} | User: {s.user_id} | Events: {event_count}")
+                except Exception as sess_err:
+                    print(f"[HISTORY LOG] Error reading session {s.id}: {sess_err}")
+        except Exception as e:
+            print(f"[HISTORY LOG] Failed to list all sessions: {e}")
+        # --- SESSION LOGGING END ---
+
         # Heuristic phrases that indicate agent reasoning rather than user-facing response
         SKIP_PHRASES = [
-            "The user wants",
-            "According to the",
-            "Following my",
-            "Plan:",
-            "Step 1:",
-            "I will now",
-            "I must:",
-            "My workflow is:",
-            "Looking at the context",
-            "The read_state call",
-            "I will call",
-            "I encountered an internal",
-            "Corrected Payload Construction:",
+            "The user wants", "According to the", "Following my", "Plan:", 
+            "Step 1:", "I will now", "I must:", "My workflow is:", 
+            "Looking at the context", "The read_state call", "I will call", 
+            "I encountered an internal", "Corrected Payload Construction:", 
             "The previous submission failed"
         ]
 
@@ -151,56 +163,69 @@ def run():
             return "\n".join([t for t in text_bits if t]).strip()
 
         try:
-            # 1. Fetch sessions
+            # 1. Fetch ALL sessions for this thread user
             response = await session_service.list_sessions(app_name=AGENT_NAME, user_id=user_id)
             sessions = response.sessions if (response and response.sessions) else []
-            
-            target_session = None
-            if sessions:
-                # Try finding by explicit tag
-                for s in sessions:
-                    state_raw = getattr(s, "state", None)
-                    state = {}
-                    if state_raw:
-                        if isinstance(state_raw, str):
-                            try: state = json.loads(state_raw)
-                            except: pass
-                        elif isinstance(state_raw, dict): state = state_raw
-                    
-                    if state.get("_ag_ui_thread_id") == threadId:
-                        target_session = await session_service.get_session(app_name=AGENT_NAME, user_id=user_id, session_id=s.id)
-                        break
-                
-                # Fallback to absolute most recent
-                if not target_session:
-                    last_s = sessions[0]
-                    target_session = await session_service.get_session(app_name=AGENT_NAME, user_id=user_id, session_id=last_s.id)
 
-            if not target_session:
+            if not sessions:
                 return JSONResponse(content={"messages": []})
 
-            # 2. Process events
-            messages = []
-            raw_events = getattr(target_session, "events", []) or []
-            print(f"[DEBUG] Processing {len(raw_events)} events for {threadId}")
+            # 2. Collect & deduplicate events from EVERY session
+            seen_ids = set()
+            all_events = []
+            
+            for s in sessions:
+                try:
+                    full_s = await session_service.get_session(
+                        app_name=AGENT_NAME, user_id=user_id, session_id=s.id
+                    )
+                    if not full_s:
+                        continue
+                        
+                    for ev in (getattr(full_s, "events", []) or []):
+                        ev_id = getattr(ev, "id", None)
+                        if ev_id and ev_id in seen_ids:
+                            continue
+                        if ev_id:
+                            seen_ids.add(ev_id)
+                        all_events.append(ev)
+                except Exception:
+                    continue
 
-            for i, event in enumerate(raw_events):
+            print(f"[DEBUG] Processing {len(all_events)} total events across {len(sessions)} sessions for {threadId}")
+
+            # ==========================================
+            # THE FIX: SORT EVENTS CHRONOLOGICALLY
+            # ==========================================
+            def get_timestamp(event):
+                # Try common timestamp attributes from Google Agent SDKs
+                ts = getattr(event, "create_time", None) or getattr(event, "timestamp", None)
+                if isinstance(ts, dict): # Handle protobuf timestamp dicts if applicable
+                    return ts.get("seconds", 0)
+                return ts or 0
+
+            # Sort from oldest to newest so the UI renders top-to-bottom correctly
+            all_events.sort(key=get_timestamp)
+
+            # 3. Process events into clean user-facing messages
+            messages = []
+            for event in all_events:
                 try:
                     author = getattr(event, "author", None)
-                    if not author: continue
-                    
-                    # Skip tech-heavy events or broad thoughts
+                    if not author:
+                        continue
+
                     is_p = getattr(event, "partial", False) if not isinstance(event, dict) else event.get("partial", False)
                     is_t = getattr(event, "thought", False) if not isinstance(event, dict) else event.get("thought", False)
                     if is_p or is_t:
                         continue
 
-                    # Skip sub-agent internal reasoning events (unless it's the final answer)
                     if author in ["compilation_agent", "tailoring_agent"] and is_p:
                         continue
 
                     text = extract_text(getattr(event, "content", None) if not isinstance(event, dict) else event.get("content"))
-                    if not text: continue
+                    if not text:
+                        continue
 
                     role = "user" if author == "user" else "assistant"
                     messages.append({
@@ -208,7 +233,7 @@ def run():
                         "role": role,
                         "content": text,
                     })
-                except:
+                except Exception:
                     continue
 
             print(f"[DEBUG] Recovered {len(messages)} CLEAN messages for {threadId}")
@@ -219,7 +244,6 @@ def run():
             import traceback
             traceback.print_exc()
             return JSONResponse(content={"messages": [], "error": str(e)})
-
     # ------------------------------------------------------------------
     # POST /validate-template — Validate a Jinja2 template
     # ------------------------------------------------------------------

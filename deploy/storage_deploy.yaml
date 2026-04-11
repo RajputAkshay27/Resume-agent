@@ -1,0 +1,77 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: storage-s3-secret
+  namespace: resume-agent
+type: Opaque
+data:
+  S3_ACCESS_KEY: R0s1ZjYwMDdkNTVjMzg5M2RkMjA3YTM0NjA=
+  S3_SECRET_KEY: Mzk5OTRmZGJhZTFhYjA3NWJmZTdmNGRjMTVhZDYxZjlkNWQzZDhhNWFkNTk2M2UwNjRmOTIwZTFjMDU3NjU3MA==
+  INTERNAL_API_KEY: K3BEQjJibVU4UUkrd3NFM2x2RkJLOExvMFNhR083ZGd3TU1DWUw4b0ZuWT0=
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: storage
+  namespace: resume-agent
+  labels:
+    app: storage
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: storage
+  template:
+    metadata:
+      labels:
+        app: storage
+    spec:
+      containers:
+      - name: storage
+        image: storage:v0.1.1
+        ports:
+        - containerPort: 8001
+        env:
+        - name: S3_ENDPOINT
+          value: "http://garage-headless.garage.svc.cluster.local:3900"
+        - name: S3_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: storage-s3-secret
+              key: S3_ACCESS_KEY
+        - name: S3_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: storage-s3-secret
+              key: S3_SECRET_KEY
+        - name: INTERNAL_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: storage-s3-secret
+              key: INTERNAL_API_KEY
+        - name: S3_BUCKET
+          value: "resume-agent-bucket"
+        - name: S3_REGION
+          value: "garage"
+        - name: S3_SECURE
+          value: "false"
+        - name: FRONTEND_URL
+          value: "http://localhost:3000"
+        - name: BACKEND_URL
+          value: "http://localhost:8000"
+        - name: LATEX_BACKEND_URL
+          value: "http://compilation-service.resume-agent.svc.cluster.local:8002"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: storage-service
+  namespace: resume-agent
+spec:
+  selector:
+    app: storage
+  ports:
+    - protocol: TCP
+      port: 8001
+      targetPort: 8001
+  type: ClusterIP

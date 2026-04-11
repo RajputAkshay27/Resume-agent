@@ -37,7 +37,7 @@ STORAGE_SERVICE_URL = STORAGE_SERVICE_URL.replace('"', "").replace("'", "").stri
 if not STORAGE_SERVICE_URL.startswith("http"):
     STORAGE_SERVICE_URL = f"http://{STORAGE_SERVICE_URL}"
 
-INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "default_secret_key_change_me")
+INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY")
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3001")
 

@@ -364,7 +364,7 @@ function ChatArea({ session, updateSession }: { session: ChatSession; updateSess
     const fetchHistory = async () => {
       try {
         console.log(`[history] ⚡ Fetching history for ${session.id} (available=${isAvailable})`);
-        const res = await fetch(`http://localhost:8000/history?threadId=${session.id}`);
+        const res = await fetch(`/agent-api/history?threadId=${session.id}`);
         if (!res.ok) {
           console.warn(`[history] Backend returned ${res.status}`);
           return;

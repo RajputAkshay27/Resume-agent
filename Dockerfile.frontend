@@ -10,7 +10,11 @@ RUN --mount=type=cache,target=/root/.npm \
 COPY . .
 # Use a dummy DATABASE_URL for prisma generate and use cache mount for build
 RUN --mount=type=cache,target=/app/.next/cache \
-    DATABASE_URL="file:./dev.db" PRISMA_CLI_QUERY_ENGINE_TYPE="binary" npx prisma generate && \
+    DATABASE_URL="file:./dev.db" \
+    PRISMA_CLI_QUERY_ENGINE_TYPE="binary" \
+    NODE_OPTIONS="--max-old-space-size=1536" \
+    NEXT_TELEMETRY_DISABLED=1 \
+    npx prisma generate && \
     npm run build
 
 # --- Stage 2: Final Production Image ---

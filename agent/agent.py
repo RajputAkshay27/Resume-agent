@@ -38,8 +38,9 @@ logger = logging.getLogger(__name__)
 def create_agent():
     # --- Models -----------------------------------------------------------
     # Orchestrator: Gemma-4-31B-it — frontier reasoning, great tool use
+    orchestrator_model = os.getenv("ORCHESTRATOR_MODEL", "gemini/gemma-4-31b-it")
     gemma_brain = LiteLlm(
-        model="gemini/gemma-4-31b-it",
+        model=orchestrator_model,
         api_key=os.getenv("GOOGLE_API_KEY"),
         num_retries=3,
     )

@@ -1,0 +1,83 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agent-data-pvc
+  namespace: resume-agent
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent
+  namespace: resume-agent
+  labels:
+    app: agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent
+  template:
+    metadata:
+      labels:
+        app: agent
+    spec:
+      containers:
+      - name: agent
+        image: agent:v1.0
+        ports:
+        - containerPort: 8000
+        env:
+        - name: GOOGLE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: resume-app-secrets
+              key: GOOGLE_API_KEY
+        - name: INTERNAL_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: resume-app-secrets
+              key: INTERNAL_API_KEY
+        - name: NEXTAUTH_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: resume-app-secrets
+              key: NEXTAUTH_SECRET
+        - name: STORAGE_SERVICE_URL
+          value: "http://storage-service.resume-agent.svc.cluster.local:8001"
+        - name: LATEX_SERVICE_URL
+          value: "http://compilation-service.resume-agent.svc.cluster.local:8002"
+        - name: FRONTEND_URL
+          value: "http://frontend-service.resume-agent.svc.cluster.local:3000"
+        - name: ORCHESTRATOR_MODEL
+          value: "gemini/gemma-4-31b-it"
+        - name: GENERATOR_MODEL
+          value: "gemini/gemma-4-26b-a4b-it"
+        - name: GENERATOR_PROVIDER
+          value: "gemini"
+        volumeMounts:
+        - name: agent-data
+          mountPath: /app/agent/data
+      volumes:
+      - name: agent-data
+        persistentVolumeClaim:
+          claimName: agent-data-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-service
+  namespace: resume-agent
+spec:
+  selector:
+    app: agent
+  ports:
+    - protocol: TCP
+      port: 8000
+      targetPort: 8000
+  type: ClusterIP

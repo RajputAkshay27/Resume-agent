@@ -26,7 +26,9 @@ def run():
     agent = create_agent()
 
     # Use SQLite for persistent session storage across restarts
-    session_service = SqliteSessionService("sqlite:///sessions.db")
+    # Ensure the data directory exists
+    os.makedirs("data", exist_ok=True)
+    session_service = SqliteSessionService("sqlite:///data/sessions.db")
 
     resume_building_agent = ADKAgent(
         adk_agent=agent,

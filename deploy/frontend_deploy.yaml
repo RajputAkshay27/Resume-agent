@@ -1,0 +1,93 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: frontend-data-pvc
+  namespace: resume-agent
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: resume-agent
+  labels:
+    app: frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+      - name: frontend
+        image: frontend:v1.0
+        ports:
+        - containerPort: 3000
+        env:
+        - name: DATABASE_URL
+          value: "file:/app/data/dev.db"
+        - name: NEXTAUTH_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: resume-app-secrets
+              key: NEXTAUTH_SECRET
+        - name: INTERNAL_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: resume-app-secrets
+              key: INTERNAL_API_KEY
+        - name: GOOGLE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: resume-app-secrets
+              key: GOOGLE_API_KEY
+        - name: NEXTAUTH_URL
+          value: "http://localhost:30000" # Update this to your external URL
+        - name: FRONTEND_URL
+          value: "http://localhost:30000"
+        - name: AGENT_URL
+          value: "http://agent-service.resume-agent.svc.cluster.local:8000"
+        - name: STORAGE_SERVICE_URL
+          value: "http://storage-service.resume-agent.svc.cluster.local:8001"
+        - name: LATEX_SERVICE_URL
+          value: "http://compilation-service.resume-agent.svc.cluster.local:8002"
+        - name: RENAME_LLM_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: resume-app-secrets
+              key: GOOGLE_API_KEY
+        - name: RENAME_LLM_MODEL
+          value: "gemma-3-27b-it"
+        - name: RENAME_LLM_BASE_URL
+          value: "https://generativelanguage.googleapis.com/v1beta/openai/v1"
+        volumeMounts:
+        - name: frontend-data
+          mountPath: /app/data
+      volumes:
+      - name: frontend-data
+        persistentVolumeClaim:
+          claimName: frontend-data-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-service
+  namespace: resume-agent
+spec:
+  selector:
+    app: frontend
+  ports:
+    - protocol: TCP
+      port: 3000
+      targetPort: 3000
+      nodePort: 30000
+  type: NodePort

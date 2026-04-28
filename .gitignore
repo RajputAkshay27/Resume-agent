@@ -61,4 +61,4 @@ prisma/dev.db
 # secrets
 deploy/secrets.yaml
 storage/.env
-
+deploy/secrets/*

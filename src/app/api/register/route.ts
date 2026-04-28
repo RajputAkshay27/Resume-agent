@@ -1,18 +1,6 @@
 
-import { PrismaClient } from "@prisma/client";
-import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3";
-import Database from "better-sqlite3";
+import prisma from "@/lib/db";
 import bcrypt from "bcryptjs";
-
-const globalForPrisma = global as unknown as { prisma: PrismaClient };
-let prisma = globalForPrisma.prisma;
-if (!prisma) {
-  const adapter = new PrismaBetterSqlite3({
-    url: process.env.DATABASE_URL || "file:./dev.db"
-  });
-  prisma = new PrismaClient({ adapter });
-}
-if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
 
 export async function POST(req: Request) {
   try {

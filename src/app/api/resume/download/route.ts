@@ -1,17 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { PrismaClient } from "@prisma/client";
-import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3";
+import prisma from "@/lib/db";
 import { storageClient } from "@/lib/storage-client";
-
-const globalForPrisma = global as unknown as { prisma: PrismaClient };
-let prisma = globalForPrisma.prisma;
-if (!prisma) {
-  const adapter = new PrismaBetterSqlite3({
-    url: process.env.DATABASE_URL || "file:./dev.db"
-  });
-  prisma = new PrismaClient({ adapter });
-  globalForPrisma.prisma = prisma;
-}
 
 const LATEX_SERVICE_URL = (() => {
   const raw = process.env.LATEX_SERVICE_URL || "http://localhost:8002";

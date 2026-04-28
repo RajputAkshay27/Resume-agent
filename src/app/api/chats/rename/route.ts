@@ -1,18 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth/next";
 import { authOptions } from "../../auth/[...nextauth]/route";
-import { PrismaClient } from "@prisma/client";
-import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3";
-
-const globalForPrisma = global as unknown as { prisma: PrismaClient };
-let prisma = globalForPrisma.prisma;
-if (!prisma) {
-  const adapter = new PrismaBetterSqlite3({
-    url: process.env.DATABASE_URL || "file:./dev.db"
-  });
-  prisma = new PrismaClient({ adapter });
-  globalForPrisma.prisma = prisma;
-}
+import prisma from "@/lib/db";
 
 async function generateTitle(message: string): Promise<string> {
   const apiKey = process.env.RENAME_LLM_API_KEY || process.env.GOOGLE_API_KEY;

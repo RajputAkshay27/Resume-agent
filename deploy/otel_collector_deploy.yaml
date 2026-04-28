@@ -1,0 +1,177 @@
+---
+# ConfigMap — OTel Collector configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: resume-agent
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: "0.0.0.0:4317"
+
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+
+    processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 200
+        spike_limit_mib: 50
+
+      batch:
+        send_batch_size: 512
+        timeout: 5s
+
+      # Tail-based sampling — decision is made AFTER the full trace arrives.
+      # Policies are evaluated in order; first match wins.
+      tail_sampling:
+        # Wait this long after seeing the first span before deciding.
+        # Set to cover your longest expected trace (LLM call + compile).
+        decision_wait: 30s
+        # Max number of traces to hold in memory at once.
+        # Keep low given the Collector's memory budget (~256 Mi).
+        num_traces: 2000
+        policies:
+          # 1. Always keep traces that contain at least one ERROR span.
+          #    Covers 500s, pdflatex failures, ADK tool errors, etc.
+          - name: errors-policy
+            type: status_code
+            status_code:
+              status_codes: [ERROR]
+
+          # 2. Always keep slow traces (full resume build can take 60-120s;
+          #    this captures anything noticeably slower than a normal run).
+          - name: slow-requests-policy
+            type: latency
+            latency:
+              threshold_ms: 500
+
+          # 3. Probabilistic catch-all — keep 10% of everything else.
+          #    Gives you a representative sample of healthy, fast requests
+          #    without flooding OpenObserve's 300 Mi storage pod.
+          - name: probabilistic-fallback
+            type: probabilistic
+            probabilistic:
+              sampling_percentage: 10
+
+    exporters:
+      # Export all signals to OpenObserve via OTLP HTTP.
+      # OpenObserve's OTLP endpoint is /api/default (version-negotiated).
+      otlphttp/openobserve:
+        endpoint: "http://openobserve-service.resume-agent.svc.cluster.local:5080/api/default/otlp"
+        headers:
+          Authorization: "${env:OPENOBSERVE_AUTH}"
+          stream-name: default
+        compression: gzip
+        retry_on_failure:
+          enabled: true
+          initial_interval: 5s
+          max_interval: 30s
+          max_elapsed_time: 300s
+
+      # Debug exporter (stdout) — remove or set verbosity: none in production
+      debug:
+        verbosity: basic
+
+    service:
+      extensions: [health_check]
+      pipelines:
+        # Traces pipeline uses tail_sampling BEFORE batching
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, tail_sampling, batch]
+          exporters: [otlphttp/openobserve, debug]
+
+        # Metrics and logs don't need tail sampling
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [otlphttp/openobserve]
+
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [otlphttp/openobserve, debug]
+
+      telemetry:
+        logs:
+          level: "info"   # Increased from warn to help debug ingestion
+---
+# Deployment — OTel Collector
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: resume-agent
+  labels:
+    app: otel-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+    spec:
+      containers:
+      - name: otel-collector
+        # Use contrib image — includes tail_sampling and otlphttp exporters
+        image: otel/opentelemetry-collector-contrib:0.103.0
+        args: ["--config=/conf/config.yaml"]
+        ports:
+        - name: otlp-grpc
+          containerPort: 4317
+        env:
+        - name: OPENOBSERVE_AUTH
+          valueFrom:
+            secretKeyRef:
+              name: otel-secrets
+              key: OPENOBSERVE_AUTH
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "50m"
+          limits:
+            memory: "256Mi"
+            cpu: "300m"
+        volumeMounts:
+        - name: config-vol
+          mountPath: /conf
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 13133   # Collector health-check extension (built-in)
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 13133
+          initialDelaySeconds: 10
+          periodSeconds: 30
+      volumes:
+      - name: config-vol
+        configMap:
+          name: otel-collector-config
+---
+# Service — ClusterIP so all pods can push OTLP gRPC on port 4317
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector-service
+  namespace: resume-agent
+spec:
+  selector:
+    app: otel-collector
+  ports:
+  - name: otlp-grpc
+    port: 4317
+    targetPort: 4317
+  type: ClusterIP

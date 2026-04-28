@@ -23,10 +23,12 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 
 from latex_bridge import render_resume, compile_pdf
+from logging_config import setup_logging
 
 load_dotenv()
 
-logging.basicConfig(level=logging.INFO)
+# Structured JSON logging setup FIRST
+setup_logging("compilation")
 logger = logging.getLogger("compilation-service")
 
 # ── Config ──────────────────────────────────────────────────────────────────
@@ -51,6 +53,11 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+# Initialise OTel SDK (traces + metrics + compile histogram)
+from telemetry import setup_telemetry, get_compile_histogram
+setup_telemetry(app)
+_compile_histogram = get_compile_histogram()
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
 
@@ -176,7 +183,13 @@ async def compile_latex(req: CompileRequest):
 
     temp_dir = tempfile.mkdtemp(prefix="resume_compile_")
     try:
+        start = time.perf_counter()
         pdf_path = compile_pdf(req.tex_content, temp_dir)
+        compile_duration = time.perf_counter() - start
+        _compile_histogram.record(
+            compile_duration,
+            attributes={"thread_id": req.thread_id},
+        )
 
         with open(pdf_path, "rb") as f:
             pdf_bytes = f.read()
@@ -185,7 +198,10 @@ async def compile_latex(req: CompileRequest):
         pdf_key = f"thread_pdfs/{req.thread_id}-{timestamp}.pdf"
         _storage_upload_bytes(pdf_key, pdf_bytes, "application/pdf")
 
-        logger.info("[/compile] PDF uploaded: %s", pdf_key)
+        logger.info(
+            "PDF compiled and uploaded",
+            extra={"pdf_key": pdf_key, "compile_duration_s": round(compile_duration, 2)},
+        )
         return CompileResponse(pdf_key=pdf_key, success=True)
 
     except RuntimeError as e:

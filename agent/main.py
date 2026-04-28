@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel as PydanticBaseModel
+from logging_config import setup_logging
 from agent import create_agent
 from dotenv import load_dotenv
 from ag_ui_adk import ADKAgent, add_adk_fastapi_endpoint
@@ -14,7 +15,8 @@ from google.adk.sessions.sqlite_session_service import SqliteSessionService
 
 from latex_bridge import validate_template
 
-logging.basicConfig(level=logging.INFO)
+# Set up structured JSON logging FIRST — before anything that touches logging
+setup_logging("agent")
 logger = logging.getLogger(__name__)
 
 
@@ -50,6 +52,10 @@ def run():
         allow_headers=["*"],
     )
 
+    # Initialise OTel SDK (traces + metrics + auto-instrumentation)
+    from telemetry import setup_telemetry
+    setup_telemetry(app)
+
     # ------------------------------------------------------------------
     # Global exception handler — catch unhandled errors before they
     # corrupt the SSE event stream with unexpected 500 responses
@@ -57,9 +63,10 @@ def run():
     @app.exception_handler(Exception)
     async def global_exception_handler(request: Request, exc: Exception):
         logger.error(
-            "Unhandled exception on %s %s: %s",
-            request.method, request.url, exc,
+            "Unhandled exception on %s %s",
+            request.method, str(request.url),
             exc_info=True,
+            extra={"error": str(exc)},
         )
         return JSONResponse(
             status_code=500,
@@ -77,26 +84,28 @@ def run():
 
         AGENT_NAME = "resume_builder_agent"
         user_id = f"thread_user_{threadId}"
-        print(f"[DEBUG] Fetching history for threadId: {threadId} (user_id: {user_id})")
+        logger.debug("Fetching history", extra={"thread_id": threadId, "user_id": user_id})
 
         # --- SESSION LOGGING START ---
         # As requested: List all sessions and the number of events in them
         try:
             all_sessions_response = await session_service.list_sessions(app_name=AGENT_NAME)
             all_sessions = all_sessions_response.sessions if all_sessions_response and all_sessions_response.sessions else []
-            print(f"[HISTORY LOG] Database contains {len(all_sessions)} total sessions.")
+            logger.debug("Session count", extra={"total_sessions": len(all_sessions)})
             for s in all_sessions:
                 try:
-                    # Get full session to count events
                     full_session = await session_service.get_session(
                         app_name=AGENT_NAME, user_id=s.user_id, session_id=s.id
                     )
                     event_count = len(getattr(full_session, "events", []) or [])
-                    print(f"[HISTORY LOG] Session: {s.id} | User: {s.user_id} | Events: {event_count}")
+                    logger.debug(
+                        "Session summary",
+                        extra={"session_id": s.id, "user_id": s.user_id, "event_count": event_count},
+                    )
                 except Exception as sess_err:
-                    print(f"[HISTORY LOG] Error reading session {s.id}: {sess_err}")
+                    logger.warning("Error reading session", extra={"session_id": s.id, "error": str(sess_err)})
         except Exception as e:
-            print(f"[HISTORY LOG] Failed to list all sessions: {e}")
+            logger.warning("Failed to list all sessions", extra={"error": str(e)})
         # --- SESSION LOGGING END ---
 
         # Heuristic phrases that indicate agent reasoning rather than user-facing response
@@ -194,7 +203,10 @@ def run():
                 except Exception:
                     continue
 
-            print(f"[DEBUG] Processing {len(all_events)} total events across {len(sessions)} sessions for {threadId}")
+            logger.debug(
+                "Processing events",
+                extra={"thread_id": threadId, "total_events": len(all_events), "sessions": len(sessions)},
+            )
 
             # ==========================================
             # THE FIX: SORT EVENTS CHRONOLOGICALLY
@@ -238,14 +250,16 @@ def run():
                 except Exception:
                     continue
 
-            print(f"[DEBUG] Recovered {len(messages)} CLEAN messages for {threadId}")
+            logger.info(
+                "History recovered",
+                extra={"thread_id": threadId, "message_count": len(messages)},
+            )
             return JSONResponse(content={"messages": messages})
 
         except Exception as e:
-            print(f"[ERROR] History failure: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error("History failure", exc_info=True, extra={"error": str(e)})
             return JSONResponse(content={"messages": [], "error": str(e)})
+
     # ------------------------------------------------------------------
     # POST /validate-template — Validate a Jinja2 template
     # ------------------------------------------------------------------

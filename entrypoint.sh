@@ -1,13 +1,14 @@
-# Initialize the SQLite database
-echo "Initializing Database..."
-cd /app
-npx prisma db push --accept-data-loss
+#!/bin/sh
+set -e
 
-# Start the Python agent in the background
-echo "Starting Resume Agent..."
-cd /app/agent && uv run main.py &
+# Apply the current Prisma schema to the SQLite DB (idempotent — safe to run on every start).
+# 'db push' only adds/alters tables; it never drops columns that still exist in the schema,
+# so existing data on the persistent volume is preserved.
+echo "[entrypoint] Running prisma db push..."
+cd /app
+node /app/node_modules/prisma/build/index.js db push --skip-generate
+echo "[entrypoint] Database ready."
 
 # Start the Next.js server in the foreground
-echo "Starting Next.js Server..."
-cd /app
-node server.js
+echo "[entrypoint] Starting Next.js server..."
+exec node server.js

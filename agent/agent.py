@@ -25,6 +25,7 @@ from google.genai import types
 from pydantic import ValidationError
 from schemas import TailoredResume, SectionPreferences
 import os
+from adk_telemetry import adk_before_tool, adk_after_tool
 
 
 # Configure logging
@@ -111,6 +112,8 @@ def create_agent():
             temperature=0.8
         ),
         tools=[get_all_context, submit_tailored_resume],
+        before_tool_callback=adk_before_tool,
+        after_tool_callback=adk_after_tool,
     )
 
     # --- Sub-Agent: LaTeX Rendering Agent -----------------------------------
@@ -146,6 +149,8 @@ def create_agent():
             temperature=0.1,
         ),
         tools=[read_state, render_latex],
+        before_tool_callback=adk_before_tool,
+        after_tool_callback=adk_after_tool,
     )
 
     # --- Root Agent: Orchestrator ----------------------------------------
@@ -219,6 +224,8 @@ def create_agent():
         ),
         tools=[read_state],
         sub_agents=[tailoring_agent, compilation_agent],
+        before_tool_callback=adk_before_tool,
+        after_tool_callback=adk_after_tool,
     )
 
     return root_agent

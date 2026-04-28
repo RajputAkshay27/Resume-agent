@@ -32,6 +32,10 @@ spec:
           value: "http://localhost:3000"
         - name: BACKEND_URL
           value: "http://localhost:8000"
+        # - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        #   value: "http://otel-collector-service.resume-agent.svc.cluster.local:4317"
+        # - name: OTEL_SERVICE_NAME
+        #   value: "compilation"
 ---
 apiVersion: v1
 kind: Service

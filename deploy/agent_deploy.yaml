@@ -29,7 +29,7 @@ spec:
     spec:
       containers:
       - name: agent
-        image: agent:v1.0
+        image: agent:v0.2
         ports:
         - containerPort: 8000
         env:
@@ -60,6 +60,10 @@ spec:
           value: "gemini/gemma-4-26b-a4b-it"
         - name: GENERATOR_PROVIDER
           value: "gemini"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://otel-collector-service.resume-agent.svc.cluster.local:4317"
+        - name: OTEL_SERVICE_NAME
+          value: "agent"
         volumeMounts:
         - name: agent-data
           mountPath: /app/agent/data

@@ -1,0 +1,109 @@
+---
+# PersistentVolumeClaim — OpenObserve data
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: openobserve-data-pvc
+  namespace: resume-agent
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+# Deployment — OpenObserve all-in-one (self-hosted)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openobserve
+  namespace: resume-agent
+  labels:
+    app: openobserve
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: openobserve
+  template:
+    metadata:
+      labels:
+        app: openobserve
+    spec:
+      containers:
+      - name: openobserve
+        image: public.ecr.aws/zinclabs/openobserve:latest
+        ports:
+        - name: http
+          containerPort: 5080
+        env:
+        - name: ZO_ROOT_USER_EMAIL
+          valueFrom:
+            secretKeyRef:
+              name: otel-secrets
+              key: ZO_ROOT_USER_EMAIL
+        - name: ZO_ROOT_USER_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: otel-secrets
+              key: ZO_ROOT_USER_PASSWORD
+        - name: ZO_DATA_DIR
+          value: "/data"
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "300Mi"   # As requested
+            cpu: "500m"
+        volumeMounts:
+        - name: openobserve-data
+          mountPath: /data
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 5080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 5080
+          initialDelaySeconds: 30
+          periodSeconds: 30
+      volumes:
+      - name: openobserve-data
+        persistentVolumeClaim:
+          claimName: openobserve-data-pvc
+---
+# Service — ClusterIP for Collector → OpenObserve traffic
+apiVersion: v1
+kind: Service
+metadata:
+  name: openobserve-service
+  namespace: resume-agent
+spec:
+  selector:
+    app: openobserve
+  ports:
+  - name: http
+    port: 5080
+    targetPort: 5080
+  type: ClusterIP
+---
+# Service — NodePort for accessing the OpenObserve UI from outside the cluster
+# Access via: http://<node-ip>:30580
+apiVersion: v1
+kind: Service
+metadata:
+  name: openobserve-ui
+  namespace: resume-agent
+spec:
+  selector:
+    app: openobserve
+  ports:
+  - name: http
+    port: 5080
+    targetPort: 5080
+    nodePort: 30580
+  type: NodePort

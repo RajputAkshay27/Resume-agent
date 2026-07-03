@@ -15,7 +15,7 @@ from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.llm_response import LlmResponse
 from pydantic import ValidationError
 from schemas import SectionPreferences, TailoredResume
-from latex_bridge import validate_template as _validate_template
+from latex_bridge import validate_template as _validate_template, render_resume, compile_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +23,58 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _load_local_profile() -> dict:
+    path = os.getenv("MASTER_PROFILE_PATH", "data/master_profile.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error("Error loading master profile: %s", e)
+        return {}
+
+
+def _load_local_jd() -> str:
+    path = os.getenv("JOB_DESCRIPTION_PATH", "data/job_description.txt")
+    if not os.path.exists(path):
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception as e:
+        logger.error("Error loading job description: %s", e)
+        return ""
+
+
+def _load_local_prefs() -> dict:
+    path = os.getenv("PREFERENCES_PATH", "data/preferences.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error("Error loading preferences: %s", e)
+        return {}
+
+
+def _load_local_template() -> str:
+    path = os.getenv("RESUME_TEMPLATE_PATH", "data/resume_template.tex")
+    if not os.path.exists(path):
+        # Fallback to root template
+        if os.path.exists("resume_template.tex"):
+            with open("resume_template.tex", "r", encoding="utf-8") as f:
+                return f.read()
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception as e:
+        logger.error("Error loading resume template: %s", e)
+        return ""
+
 
 def _get_thread_id(tool_context: ToolContext) -> str:
     """Get the CopilotKit thread ID from the agent session state."""
@@ -182,8 +234,7 @@ def read_state(tool_context: ToolContext):
 # ---------------------------------------------------------------------------
 
 def render_latex(tool_context: ToolContext):
-    """Render the tailored resume data into a Jinja2 LaTeX template and store the .tex file in S3.
-    The PDF will be compiled on-demand when the user clicks the download button."""
+    """Render the tailored resume data into a Jinja2 LaTeX template and store/compile it."""
     try:
         tailored = tool_context.state.get("tailored_resume")
         if not tailored:
@@ -191,11 +242,15 @@ def render_latex(tool_context: ToolContext):
 
         thread_id = _get_thread_id(tool_context)
 
-        # 1. Fetch context (template_key and tailored profile) from the frontend API
-        data = _internal_get(f"/api/internal/context?threadId={thread_id}")
-        template_key = data.get("templateKey")
-        if not template_key:
-            return "No LaTeX template found. Please upload a template in the context panel (Edit JD → Chat Template)."
+        # Try to use frontend context if FRONTEND_URL is set
+        frontend_url = os.getenv("FRONTEND_URL")
+        template_key = None
+        if frontend_url:
+            try:
+                data = _internal_get(f"/api/internal/context?threadId={thread_id}")
+                template_key = data.get("templateKey")
+            except Exception as e:
+                logger.warning("Failed to fetch template key from frontend, falling back to local template: %s", e)
 
         # 2. Validate and resolve the tailored resume
         try:
@@ -207,7 +262,40 @@ def render_latex(tool_context: ToolContext):
         except Exception as e:
             return f"Could not parse tailored resume from state: {e}"
 
-        # 3. Call the LaTeX Service /render endpoint
+        if not template_key:
+            # Standalone Local Mode: Render and compile directly to local output directory
+            template_content = _load_local_template()
+            if not template_content:
+                return "No LaTeX template found. Please place a template at data/resume_template.tex."
+
+            try:
+                rendered_tex = render_resume(template_content, validated_resume)
+            except Exception as e:
+                return f"LaTeX render failed: {e}"
+
+            # Ensure output directory exists
+            output_dir = os.getenv("OUTPUT_DIR", "output")
+            os.makedirs(output_dir, exist_ok=True)
+
+            tex_path = os.path.join(output_dir, "resume.tex")
+            with open(tex_path, "w", encoding="utf-8", newline="") as f:
+                f.write(rendered_tex)
+
+            pdf_path = None
+            try:
+                # Compile PDF locally
+                pdf_path = compile_pdf(rendered_tex, output_dir)
+            except Exception as e:
+                logger.warning("Failed to compile PDF locally (is pdflatex installed?): %s", e)
+
+            msg = f"LaTeX rendered successfully and saved to {tex_path}!\n"
+            if pdf_path:
+                msg += f"PDF compiled successfully and saved to {pdf_path}!\n"
+            else:
+                msg += "Note: PDF compilation skipped or failed. Ensure 'pdflatex' is installed and in your PATH."
+            return msg
+
+        # 3. Call the LaTeX Service /render endpoint (Original microservice path)
         latex_service_url = os.getenv("LATEX_SERVICE_URL", "http://localhost:8002")
         latex_service_url = latex_service_url.replace('"', '').replace("'", '').strip()
         if not latex_service_url.startswith("http"):
@@ -264,24 +352,37 @@ def get_all_context(tool_context: ToolContext) -> str:
     """Fetch ALL context needed for resume tailoring in a single call: the master profile, job description, and user preferences. Call this ONCE to get everything."""
     try:
         thread_id = _get_thread_id(tool_context)
-        try:
-            data = _internal_get(f"/api/internal/context?threadId={thread_id}")
-        except Exception as e:
-            return f"Error fetching context: {e}"
+        profile_dict = {}
+        jd = ""
+        prefs_dict = {}
 
-        # --- Master Profile ---
-        profile_dict = _ensure_dict(data.get("masterProfile", {}))
+        frontend_url = os.getenv("FRONTEND_URL")
+        if frontend_url:
+            try:
+                data = _internal_get(f"/api/internal/context?threadId={thread_id}")
+                profile_dict = _ensure_dict(data.get("masterProfile", {}))
+                jd = data.get("jobDescription", "")
+                raw_prefs = _ensure_dict(data.get("sectionPrefs", {}))
+                prefs_dict = _coerce_prefs(raw_prefs)
+            except Exception as e:
+                logger.warning("Error fetching context from frontend, falling back to local files: %s", e)
+
+        # Fallback to local files if not loaded from frontend
         if not profile_dict:
-            return "No Master Profile found. Please ask the user to fill in their profile at /profile."
-
-        # --- Job Description ---
-        jd = data.get("jobDescription", "")
+            profile_dict = _load_local_profile()
         if not jd:
-            return "No Job Description found for this thread. Please ask the user to paste a JD in the context panel."
+            jd = _load_local_jd()
+        if not prefs_dict:
+            prefs_dict = _load_local_prefs()
 
-        # --- User Preferences ---
-        raw_prefs = _ensure_dict(data.get("sectionPrefs", {}))
-        prefs_dict = _coerce_prefs(raw_prefs)
+        if not profile_dict:
+            return "No Master Profile found. Please make sure data/master_profile.json exists."
+        if not jd:
+            return "No Job Description found. Please make sure data/job_description.txt exists."
+
+        # Ensure all standard default fields exist in section preferences
+        prefs_obj = SectionPreferences(**prefs_dict)
+        prefs_dict = prefs_obj.model_dump()
 
         pref_lines = []
         if prefs_dict.get("experience_count") is not None:

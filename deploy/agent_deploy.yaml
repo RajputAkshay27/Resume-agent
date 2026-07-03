@@ -29,7 +29,7 @@ spec:
     spec:
       containers:
       - name: agent
-        image: agent:v0.2
+        image: agent:v0.3
         ports:
         - containerPort: 8000
         env:

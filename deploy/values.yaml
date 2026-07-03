@@ -1,0 +1,18 @@
+# values.yaml
+replicaCount: 1
+
+# Configure Garage to run with 1 node only
+garage:
+  config:
+    metadata_dir: /var/lib/garage/meta
+    data_dir: /var/lib/garage/data
+    # Use "dangerous" if you want to allow writing with only 1 node
+    # or "degraded" if you have a larger cluster but want to operate now
+    consistency_mode: dangerous
+    replication_factor: 1
+
+# Use HostPath or a single PV for storage
+persistence:
+  enabled: true
+  size: 10Gi
+  # accessMode: ReadWriteOnce

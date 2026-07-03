@@ -1,136 +1,112 @@
-# CopilotKit <> ADK Starter
+# AI Resume Builder Agent (Python Standalone)
 
-This is a starter template for building AI agents using Google's [ADK](https://google.github.io/adk-docs/) and [CopilotKit](https://copilotkit.ai). It provides a modern Next.js application with an integrated investment analyst agent that can research stocks, analyze market data, and provide investment insights.
+This is a standalone Python application that uses Google's [ADK (Agent Development Kit)](https://google.github.io/adk-docs/) to automatically tailor a user's resume for a specific job description and compile it to a PDF using Jinja2 LaTeX.
+
+All frontend (Next.js/Node.js) dependencies have been removed. The application runs locally via a command-line interface (CLI) or as a lightweight backend API using FastAPI.
 
 ## Prerequisites
 
-- Node.js 18+
-- Python 3.12+
-- Google Makersuite API Key (for the ADK agent) (see https://makersuite.google.com/app/apikey)
-- Any of the following package managers:
-  - pnpm (recommended)
-  - npm
-  - yarn
-  - bun
+- **Python 3.12+**
+- **pdflatex** (Optional, required for PDF compilation. If not present, the system will output the tailored LaTeX `.tex` file but skip PDF compilation).
+  - *Windows*: Install [MiKTeX](https://miktex.org/) or TeX Live.
+  - *Mac*: `brew install --cask mactex-no-gui`
+  - *Linux*: `sudo apt-get install texlive-latex-base texlive-latex-extra`
+- **Google API Key**: Needed to run the underlying Gemini model for tailoring. Get one from [Google AI Studio](https://makersuite.google.com/app/apikey).
 
-> **Note:** This repository ignores lock files (package-lock.json, yarn.lock, pnpm-lock.yaml, bun.lockb) to avoid conflicts between different package managers. Each developer should generate their own lock file using their preferred package manager. After that, make sure to delete it from the .gitignore.
+## Installation
 
-## Getting Started
+We recommend using `uv` (a fast Python package installer) or a standard Python virtual environment.
 
-1. Install dependencies using your preferred package manager:
+### Set up Virtual Environment & Install Dependencies
 
 ```bash
-# Using pnpm (recommended)
-pnpm install
-
-# Using npm
-npm install
-
-# Using yarn
-yarn install
-
-# Using bun
-bun install
-```
-
-2. Install Python dependencies for the ADK agent:
-
-```bash
-# Using pnpm
-pnpm install:agent
-
-# Using npm
-npm run install:agent
-
-# Using yarn
-yarn install:agent
-
-# Using bun
-bun run install:agent
-```
-
-> **Note:** This will automatically setup a `.venv` (virtual environment) inside the `agent` directory.
->
-> To activate the virtual environment manually, you can run:
->
-> ```bash
-> source agent/.venv/bin/activate
-> ```
-
-3. Set up your Google API key:
-
-```bash
-export GOOGLE_API_KEY="your-google-api-key-here"
-```
-
-4. Start the development server:
-
-```bash
-# Using pnpm
-pnpm dev
-
-# Using npm
-npm run dev
-
-# Using yarn
-yarn dev
-
-# Using bun
-bun run dev
-```
-
-This will start both the UI and agent servers concurrently.
-
-## Available Scripts
-
-The following scripts can also be run using your preferred package manager:
-
-- `dev` - Starts both UI and agent servers in development mode
-- `dev:debug` - Starts development servers with debug logging enabled
-- `dev:ui` - Starts only the Next.js UI server
-- `dev:agent` - Starts only the ADK agent server
-- `build` - Builds the Next.js application for production
-- `start` - Starts the production server
-- `lint` - Runs ESLint for code linting
-- `install:agent` - Installs Python dependencies for the agent
-
-## Documentation
-
-The main UI component is in `src/app/page.tsx`. You can:
-
-- Modify the theme colors and styling
-- Add new frontend actions
-- Customize the CopilotKit sidebar appearance
-
-## 📚 Documentation
-
-- [ADK Documentation](https://google.github.io/adk-docs/) - Learn more about the ADK and its features
-- [CopilotKit Documentation](https://docs.copilotkit.ai) - Explore CopilotKit's capabilities
-- [Next.js Documentation](https://nextjs.org/docs) - Learn about Next.js features and API
-
-## Contributing
-
-Feel free to submit issues and enhancement requests! This starter is designed to be easily extensible.
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Troubleshooting
-
-### Agent Connection Issues
-
-If you see "I'm having trouble connecting to my tools", make sure:
-
-1. The ADK agent is running on port 8000
-2. Your Google API key is set correctly
-3. Both servers started successfully
-
-### Python Dependencies
-
-If you encounter Python import errors:
-
-```bash
+# Navigate to agent directory
 cd agent
-pip install -r requirements.txt
+
+# Create virtual environment
+python -m venv .venv
+
+# Activate virtual environment
+# On Windows (cmd):
+.venv\Scripts\activate.bat
+# On Windows (PowerShell):
+.venv\Scripts\Activate.ps1
+# On Linux/macOS:
+source .venv/bin/activate
+
+# Install dependencies
+pip install -r pyproject.toml
 ```
+
+### Set up Environment Variables
+
+Create or update the `.env` file in the root directory (or in the `agent/` directory):
+
+```env
+GOOGLE_API_KEY="your-google-api-key-here"
+```
+
+## Running the CLI
+
+You can run the pipeline directly from the command line using the root-level `cli.py` script:
+
+```bash
+# Run with default files (loaded from the data/ folder)
+python cli.py
+
+# Run with custom input and output paths
+python cli.py \
+  --profile data/master_profile.json \
+  --jd data/job_description.txt \
+  --prefs data/preferences.json \
+  --template data/resume_template.tex \
+  --output-dir output/
+```
+
+This runs the ADK Orchestrator agent loop, performs structured tailoring, validates the results, and writes `resume.tex`, `resume.pdf`, and `tailored_resume.json` to the output folder.
+
+## Running the API Server
+
+You can also run the agent as a standalone backend server:
+
+```bash
+# Run the FastAPI server (starts on http://localhost:8000)
+python agent/main.py
+```
+
+### Stateless API Endpoint: `POST /api/tailor`
+
+This endpoint processes the resume tailoring and PDF compilation in a single, stateless request.
+
+- **URL**: `http://localhost:8000/api/tailor`
+- **Payload**:
+  ```json
+  {
+    "master_profile": { ... },
+    "job_description": "Paste JD text here",
+    "preferences": {
+      "experience_count": 3,
+      "project_count": 2,
+      "include_summary": true,
+      "include_skills": true
+    },
+    "template_content": "LaTeX Jinja2 template string..."
+  }
+  ```
+  *(Note: All fields are optional; if not provided, the server will load default fallbacks from the `data/` directory).*
+- **Response**:
+  ```json
+  {
+    "tailored_resume": { ... },
+    "rendered_tex": "LaTeX document string",
+    "compiled_pdf_base64": "Base64 encoded PDF bytes...",
+    "success": true
+  }
+  ```
+
+## Input File Formats
+
+- **data/master_profile.json**: Your complete career history (education, experiences, projects, skills).
+- **data/job_description.txt**: The plain text description of the target job.
+- **data/preferences.json**: Controls the count of items in each section and any specific prompts (e.g. `"Focus on backend development"`).
+- **data/resume_template.tex**: The LaTeX resume template using Jinja2 syntax (supports standard `{{ }}` and LaTeX-safe `\VAR{}`).

@@ -1,0 +1,178 @@
+%----------------------------------------------------------------------------------------
+%	DOCUMENT DEFINITION
+%----------------------------------------------------------------------------------------
+\documentclass[a4paper,10pt]{article}
+
+%----------------------------------------------------------------------------------------
+%	PACKAGES
+%----------------------------------------------------------------------------------------
+\usepackage{url}
+\usepackage{parskip} 	
+
+%other packages for formatting
+\RequirePackage{color}
+\RequirePackage{graphicx}
+\usepackage[dvipsnames]{xcolor}
+\usepackage[scale=0.92]{geometry}
+
+%tabularx environment
+\usepackage{tabularx}
+
+%for lists within experience section
+\usepackage{enumitem}
+
+% centered version of 'X' col.
+\newcolumntype{C}{>{\centering\arraybackslash}X} 
+
+%to prevent spillover of tabular into next pages
+\usepackage{supertabular}
+\newlength{\fullcollw}
+\setlength{\fullcollw}{0.47\textwidth}
+
+%custom \section
+\usepackage{titlesec}				
+\usepackage{multicol}
+\usepackage{multirow}
+
+%CV Sections inspired by: 
+%http://stefano.italians.nl/archives/26
+\titleformat{\section}{\Large\scshape\raggedright}{}{0em}{}[\titlerule]
+\titlespacing{\section}{0pt}{10pt}{10pt}
+
+%Setup hyperref package, and colours for links
+\usepackage[unicode, draft=false]{hyperref}
+\definecolor{linkcolour}{rgb}{0,0.2,0.6}
+\hypersetup{colorlinks,breaklinks,urlcolor=linkcolour,linkcolor=linkcolour}
+
+%----------------------------------------------------------------------------------------
+%	BEGIN DOCUMENT
+
+%----------------------------------------------------------------------------------------
+%	CUSTOM ENVIRONMENTS
+%----------------------------------------------------------------------------------------
+% Redesigned to avoid tabularx/minipage compilation errors while maintaining identical visuals
+\newenvironment{joblong}[2]
+    {
+    \noindent\textbf{#1} \hfill #2 \par\vspace{3.50pt}
+    \begin{itemize}[nosep, leftmargin=1em, itemsep=3pt,label=--]
+    }
+    {
+    \end{itemize}
+    \vspace{0.5em}
+    }
+
+%----------------------------------------------------------------------------------------
+%	BEGIN DOCUMENT
+%----------------------------------------------------------------------------------------
+\begin{document}
+
+% non-numbered pages
+\pagestyle{empty} 
+
+%----------------------------------------------------------------------------------------
+%	TITLE
+%----------------------------------------------------------------------------------------
+\begin{tabularx}{\linewidth}{@{} C @{}}
+\Huge{\VAR{name}} \\ [7.0pt]
+\BLOCK{if github}\href{https://\VAR{github}}{\VAR{github}} \ $|$ \ \BLOCK{endif}
+\BLOCK{if linkedin}\href{https://\VAR{linkedin}}{\VAR{linkedin}} \ $|$ \ \BLOCK{endif}
+\BLOCK{if website}\href{https://\VAR{website}}{\VAR{website}} \ $|$ \ \BLOCK{endif}
+\BLOCK{if email}\href{mailto:\VAR{email}}{\VAR{email}} \ $|$ \ \BLOCK{endif}
+\BLOCK{if phone}\href{tel:\VAR{phone}}{\VAR{phone}}\BLOCK{endif} \\
+\end{tabularx}
+
+%----------------------------------------------------------------------------------------
+%	SUMMARY
+%----------------------------------------------------------------------------------------
+\BLOCK{if summary}
+\section{Summary}
+\VAR{summary}
+\BLOCK{endif}
+
+%----------------------------------------------------------------------------------------
+%	WORK EXPERIENCE
+%----------------------------------------------------------------------------------------
+\BLOCK{if experience}
+\section{Work Experience}
+
+\BLOCK{for exp in experience}
+\begin{joblong}{\VAR{exp.title} @ \VAR{exp.company}}{\VAR{exp.start_date} - \VAR{exp.end_date}}
+\BLOCK{for bullet in exp.bullets}
+\item \VAR{bullet}
+\BLOCK{endfor}
+\end{joblong}
+\BLOCK{endfor}
+
+\BLOCK{endif}
+
+%----------------------------------------------------------------------------------------
+%	PROJECTS
+%----------------------------------------------------------------------------------------
+\BLOCK{if projects}
+\section{Projects}
+
+\BLOCK{for proj in projects}
+\begin{joblong}{\VAR{proj.name}}{\BLOCK{if proj.technologies}\VAR{proj.technologies}\BLOCK{endif}}
+\BLOCK{if proj.description}\item \VAR{proj.description}\BLOCK{endif}
+\BLOCK{for bullet in proj.bullets}
+\item \VAR{bullet}
+\BLOCK{endfor}
+\end{joblong}
+\BLOCK{endfor}
+
+\BLOCK{endif}
+
+%----------------------------------------------------------------------------------------
+%	SKILLS
+%----------------------------------------------------------------------------------------
+\BLOCK{if skills}
+\section{Skills}
+\begin{tabularx}{\linewidth}{@{}l X@{}}
+\BLOCK{for category, skill_list in skills.items()}
+\textbf{\VAR{category}} & {\normalsize \VAR{skill_list | join(', ')}} \\
+\BLOCK{endfor}
+\end{tabularx}
+\BLOCK{endif}
+
+%----------------------------------------------------------------------------------------
+%	ACHIEVEMENTS
+%----------------------------------------------------------------------------------------
+\BLOCK{if achievements}
+\section{Achievements}
+\begin{itemize}[nosep, leftmargin=1em, itemsep=3pt,label=--]
+\BLOCK{for ach in achievements}
+\item \VAR{ach}
+\BLOCK{endfor}
+\end{itemize}
+\BLOCK{endif}
+
+%----------------------------------------------------------------------------------------
+%	CERTIFICATIONS
+%----------------------------------------------------------------------------------------
+\BLOCK{if certifications}
+\section{Certifications}
+\begin{itemize}[nosep, leftmargin=1em, itemsep=3pt,label=--]
+\BLOCK{for cert in certifications}
+\item \VAR{cert}
+\BLOCK{endfor}
+\end{itemize}
+\BLOCK{endif}
+
+%----------------------------------------------------------------------------------------
+%	EDUCATION
+%----------------------------------------------------------------------------------------
+\BLOCK{if education}
+\section{Education}
+\begin{tabularx}{\linewidth}{@{}l X@{}}	
+\BLOCK{for edu in education}
+\BLOCK{if edu.start_date}\VAR{edu.start_date} - \BLOCK{endif}\VAR{edu.end_date} & \textbf{\VAR{edu.degree}}\BLOCK{if edu.field} in \VAR{edu.field}\BLOCK{endif} at \textbf{\VAR{edu.institution}} \BLOCK{if edu.gpa}\hfill (GPA: \VAR{edu.gpa})\BLOCK{endif} \\ 
+\BLOCK{for highlight in edu.highlights}
+& \small{\VAR{highlight}} \\
+\BLOCK{endfor}
+\BLOCK{endfor}
+\end{tabularx}
+\BLOCK{endif}
+
+\vfill
+
+\end{document}

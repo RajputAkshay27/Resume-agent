@@ -1,0 +1,9 @@
+{
+  "experience_count": 2,
+  "project_count": 1,
+  "achievement_count": 1,
+  "certification_count": 1,
+  "include_summary": true,
+  "include_skills": true,
+  "custom_instructions": "Focus on scalability, Go programming, and OpenTelemetry instrumentation."
+}

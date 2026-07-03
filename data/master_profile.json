@@ -1,0 +1,73 @@
+{
+  "name": "John Doe",
+  "email": "johndoe@email.com",
+  "phone": "+1-123-456-7890",
+  "linkedin": "linkedin.com/in/johndoe",
+  "github": "github.com/johndoe",
+  "website": "johndoe.dev",
+  "summary": "Experienced software engineer with over 5 years of experience building scalable backend services and web applications. Skilled in Python, Go, TypeScript, and cloud technologies.",
+  "experience": [
+    {
+      "company": "Tech Corp",
+      "title": "Senior Software Engineer",
+      "location": "San Francisco, CA",
+      "start_date": "Jan 2023",
+      "end_date": "Present",
+      "bullets": [
+        "Led the redesign of a core microservice using **Go**, improving throughput by **35%** and reducing latency by **50ms**.",
+        "Managed a team of **4 engineers** to deliver a real-time data streaming pipeline handling **10M+ events** daily.",
+        "Implemented structured JSON logging and **OpenTelemetry** tracing across 8 services, cutting debugging time in half."
+      ]
+    },
+    {
+      "company": "Startup Inc",
+      "title": "Software Engineer",
+      "location": "Remote",
+      "start_date": "Jun 2020",
+      "end_date": "Dec 2022",
+      "bullets": [
+        "Designed and implemented **Python / FastAPI** REST APIs for a cloud-native SaaS product deployed on **AWS**.",
+        "Optimized database queries in **PostgreSQL**, reducing page load time by **40%**.",
+        "Built automated CI/CD pipelines using **GitHub Actions**, reducing deployment failure rate to under **2%**."
+      ]
+    }
+  ],
+  "education": [
+    {
+      "institution": "State University",
+      "degree": "Bachelor of Science",
+      "field": "Computer Science",
+      "start_date": "Sep 2016",
+      "end_date": "May 2020",
+      "gpa": "3.8",
+      "highlights": [
+        "Graduated Magna Cum Laude",
+        "Teaching Assistant for Data Structures and Algorithms"
+      ]
+    }
+  ],
+  "skills": {
+    "Languages": ["Python", "Go", "TypeScript", "SQL", "HTML/CSS"],
+    "Frameworks & Libraries": ["FastAPI", "React", "Node.js", "Jinja2"],
+    "Tools & Platforms": ["Docker", "Kubernetes", "AWS", "Git", "PostgreSQL", "SQLite"]
+  },
+  "projects": [
+    {
+      "name": "AI Resume Builder",
+      "technologies": "Python, FastAPI, Next.js, LLMs",
+      "description": "An agentic AI resume tailoring system that optimizes resume details for specific job descriptions.",
+      "bullets": [
+        "Built the core agent using **ADK** and structured Pydantic outputs, achieving a validation success rate of **98%**.",
+        "Designed a Jinja2 template rendering system that compiles to PDF on demand."
+      ]
+    }
+  ],
+  "achievements": [
+    "First place in Tech Corp Hackathon (2024)",
+    "AWS Certified Solutions Architect Associate"
+  ],
+  "certifications": [
+    "AWS Certified Solutions Architect - Associate",
+    "Certified Kubernetes Administrator (CKA)"
+  ]
+}

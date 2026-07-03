@@ -1,0 +1,20 @@
+Position: Senior Backend Engineer (Python / Go)
+Company: InnovateTech
+Location: San Francisco, CA (Hybrid)
+
+About the Role:
+We are looking for a Senior Backend Engineer to join our core services team. You will be responsible for designing and scaling our microservices backend, integrating machine learning pipelines, and improving application observability. 
+
+Required Skills:
+- 5+ years of software engineering experience.
+- Strong proficiency in Python (FastAPI/Django) or Go.
+- Experience with Docker, Kubernetes, and AWS deployment.
+- Passion for system performance, microservice architecture, and structured logging/observability.
+- Experience with SQL databases (PostgreSQL/MySQL) and writing optimized queries.
+- Excellent communication and collaborative skills.
+
+Key Responsibilities:
+- Design, build, and maintain high-throughput backend APIs and services in Go and Python.
+- Collaborate with frontend engineers to integrate product features.
+- Monitor and improve system observability using OpenTelemetry and logging systems.
+- Mentor junior engineers and participate in code reviews.

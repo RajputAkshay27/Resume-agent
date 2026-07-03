@@ -13,6 +13,11 @@ from dotenv import load_dotenv
 from ag_ui_adk import ADKAgent, add_adk_fastapi_endpoint
 from google.adk.sessions.sqlite_session_service import SqliteSessionService
 
+from typing import Optional
+import uuid
+import tempfile
+import base64
+
 from latex_bridge import validate_template
 
 # Set up structured JSON logging FIRST — before anything that touches logging
@@ -44,11 +49,11 @@ def run():
     app = FastAPI(title='Resume Builder Agent - Multi-Agent Pipeline')
 
     # Allow Next.js frontend to call endpoints directly
-    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3001")
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[frontend_url],
-        allow_methods=["GET", "POST"],
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
         allow_headers=["*"],
     )
 
@@ -268,6 +273,177 @@ def run():
         """Validate a Jinja2 LaTeX template and return analysis."""
         result = validate_template(req.template_content)
         return JSONResponse(content=result)
+    # ------------------------------------------------------------------
+    # POST /api/tailor — Direct stateless resume tailoring and compilation
+    # ------------------------------------------------------------------
+    class TailorRequest(PydanticBaseModel):
+        master_profile: Optional[dict] = None
+        job_description: Optional[str] = None
+        preferences: Optional[dict] = None
+        template_content: Optional[str] = None
+
+    @app.post("/api/tailor")
+    async def api_tailor(req: TailorRequest):
+        # 1. Create a temp directory to hold the inputs and output
+        temp_dir = tempfile.mkdtemp(prefix="resume_tailor_")
+        
+        # Preserve original env variables
+        orig_env = {
+            "MASTER_PROFILE_PATH": os.getenv("MASTER_PROFILE_PATH"),
+            "JOB_DESCRIPTION_PATH": os.getenv("JOB_DESCRIPTION_PATH"),
+            "PREFERENCES_PATH": os.getenv("PREFERENCES_PATH"),
+            "RESUME_TEMPLATE_PATH": os.getenv("RESUME_TEMPLATE_PATH"),
+            "OUTPUT_DIR": os.getenv("OUTPUT_DIR"),
+        }
+        
+        try:
+            # Write inputs to temp directory
+            master_profile_path = os.path.join(temp_dir, "master_profile.json")
+            job_description_path = os.path.join(temp_dir, "job_description.txt")
+            preferences_path = os.path.join(temp_dir, "preferences.json")
+            template_path = os.path.join(temp_dir, "resume_template.tex")
+            
+            # Load local fallbacks if not provided in the request
+            master_profile = req.master_profile
+            if not master_profile:
+                from tools import _load_local_profile
+                master_profile = _load_local_profile()
+                
+            job_description = req.job_description
+            if not job_description:
+                from tools import _load_local_jd
+                job_description = _load_local_jd()
+                
+            preferences = req.preferences
+            if not preferences:
+                from tools import _load_local_prefs
+                preferences = _load_local_prefs()
+                
+            template_content = req.template_content
+            if not template_content:
+                from tools import _load_local_template
+                template_content = _load_local_template()
+
+            if not master_profile:
+                raise HTTPException(status_code=400, detail="Master profile is empty or not found.")
+            if not job_description:
+                raise HTTPException(status_code=400, detail="Job description is empty or not found.")
+            if not template_content:
+                raise HTTPException(status_code=400, detail="Template content is empty or not found.")
+
+            # Save files to temp dir
+            with open(master_profile_path, "w", encoding="utf-8") as f:
+                json.dump(master_profile, f, indent=2)
+            with open(job_description_path, "w", encoding="utf-8") as f:
+                f.write(job_description)
+            with open(preferences_path, "w", encoding="utf-8") as f:
+                json.dump(preferences or {}, f, indent=2)
+            with open(template_path, "w", encoding="utf-8") as f:
+                f.write(template_content)
+
+            # Override env variables
+            os.environ["MASTER_PROFILE_PATH"] = master_profile_path
+            os.environ["JOB_DESCRIPTION_PATH"] = job_description_path
+            os.environ["PREFERENCES_PATH"] = preferences_path
+            os.environ["RESUME_TEMPLATE_PATH"] = template_path
+            os.environ["OUTPUT_DIR"] = temp_dir
+            
+            # Temporarily clear FRONTEND_URL to force local fallback
+            orig_frontend_url = os.environ.get("FRONTEND_URL")
+            if "FRONTEND_URL" in os.environ:
+                del os.environ["FRONTEND_URL"]
+
+            # 2. Run the agent using the ADK Runner
+            from google.adk import Runner
+            from google.genai import types
+            
+            # Create runner
+            runner = Runner(
+                app_name="resume_builder_agent",
+                agent=agent,
+                session_service=session_service,
+                auto_create_session=True,
+            )
+            
+            session_id = str(uuid.uuid4())
+            user_id = f"thread_user_{session_id}"
+            
+            logger.info("Starting local tailoring agent run...")
+            
+            async for event in runner.run_async(
+                user_id=user_id,
+                session_id=session_id,
+                new_message=types.Content(parts=[types.Part.from_text(text="Tailor my resume for the job description and compile the final PDF.")]),
+            ):
+                logger.debug("Tailor run event: %s", event)
+
+            # Restore FRONTEND_URL if it was set
+            if orig_frontend_url is not None:
+                os.environ["FRONTEND_URL"] = orig_frontend_url
+
+            # 3. Read output files
+            tex_path = os.path.join(temp_dir, "resume.tex")
+            pdf_path = os.path.join(temp_dir, "resume.pdf")
+            
+            if not os.path.exists(tex_path):
+                session = await session_service.get_session(app_name="resume_builder_agent", user_id=user_id, session_id=session_id)
+                tailored_resume = session.state.get("tailored_resume") if session else None
+                if tailored_resume:
+                    from latex_bridge import render_resume, compile_pdf
+                    try:
+                        from schemas import TailoredResume
+                        validated_resume = TailoredResume(**tailored_resume)
+                        rendered_tex = render_resume(template_content, validated_resume)
+                        with open(tex_path, "w", encoding="utf-8", newline="") as f:
+                            f.write(rendered_tex)
+                        try:
+                            pdf_path = compile_pdf(rendered_tex, temp_dir)
+                        except Exception as e:
+                            logger.warning("Post-run compilation failed: %s", e)
+                    except Exception as e:
+                        raise HTTPException(status_code=500, detail=f"Failed to generate LaTeX from tailored resume state: {e}")
+                else:
+                    raise HTTPException(status_code=500, detail="Tailoring agent completed but did not produce a tailored resume.")
+
+            # Read generated files
+            with open(tex_path, "r", encoding="utf-8") as f:
+                rendered_tex = f.read()
+                
+            pdf_base64 = None
+            if os.path.exists(pdf_path):
+                with open(pdf_path, "rb") as f:
+                    pdf_base64 = base64.b64encode(f.read()).decode("utf-8")
+                    
+            # Read final state from session service
+            session = await session_service.get_session(app_name="resume_builder_agent", user_id=user_id, session_id=session_id)
+            tailored_resume = session.state.get("tailored_resume") if session else {}
+
+            return {
+                "tailored_resume": tailored_resume,
+                "rendered_tex": rendered_tex,
+                "compiled_pdf_base64": pdf_base64,
+                "success": True
+            }
+
+        except Exception as e:
+            logger.error("Stateless tailoring API error: %s", e, exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+            
+        finally:
+            # Restore original environment
+            for k, v in orig_env.items():
+                if v is None:
+                    if k in os.environ:
+                        del os.environ[k]
+                else:
+                    os.environ[k] = v
+                    
+            # Clean up temp directory
+            try:
+                import shutil
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception:
+                pass
 
     # IMPORTANT: mount the agent catch-all AFTER specific routes
     add_adk_fastapi_endpoint(app, resume_building_agent, path="/")

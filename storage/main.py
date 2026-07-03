@@ -130,7 +130,7 @@ async def upload_base64(req: UploadB64Request):
         return {"key": req.key, "success": True}
     except Exception as e:
         logger.error(f"Base64 Upload error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 @app.get("/download/{key:path}", dependencies=[Depends(verify_api_key)])
 async def download_file(key: str):

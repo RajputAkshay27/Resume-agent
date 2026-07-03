@@ -61,9 +61,11 @@ data:
 
     exporters:
       # Export all signals to OpenObserve via OTLP HTTP.
-      # OpenObserve's OTLP endpoint is /api/default (version-negotiated).
+      # OpenObserve's OTLP ingest base is /api/default — the collector
+      # automatically appends /v1/traces, /v1/metrics, /v1/logs.
+      # Do NOT add /otlp here; that causes a double-path and 404s.
       otlphttp/openobserve:
-        endpoint: "http://openobserve-service.resume-agent.svc.cluster.local:5080/api/default/otlp"
+        endpoint: "http://openobserve-service.resume-agent.svc.cluster.local:5080/api/default"
         headers:
           Authorization: "${env:OPENOBSERVE_AUTH}"
           stream-name: default

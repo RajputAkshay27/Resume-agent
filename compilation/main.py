@@ -25,6 +25,15 @@ from dotenv import load_dotenv
 from latex_bridge import render_resume, compile_pdf
 from logging_config import setup_logging
 
+# Import guardrails for LaTeX injection protection
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "agent"))
+try:
+    from guardrails import sanitize_latex
+except ImportError:
+    # Fallback: no-op sanitizer if guardrails module is not available
+    def sanitize_latex(tex: str) -> str:  # type: ignore
+        return tex
+
 load_dotenv()
 
 # Structured JSON logging setup FIRST

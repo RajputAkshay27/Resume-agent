@@ -1,18 +1,20 @@
 [project]
 name = "resume-agent"
-version = "0.2.0"
-description = "Resume Builder Multi-Agent System with structured generation pipeline"
+version = "2.0.0"
+description = "Resume Builder Multi-Agent System v2 with ATS scoring, SQLite storage, and Tkinter GUI"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi",
     "uvicorn[standard]",
     "python-dotenv",
     "pydantic",
+    "python-multipart",       # FastAPI multipart form uploads
     "google-adk[extensions]",
     "google-genai",
-    "ag-ui-adk",
     "jinja2",
     "openai",
+    "rich>=13.0",             # Terminal output formatting (CLI)
+    "click>=8.0",             # CLI subcommand framework
     # Observability
     "opentelemetry-sdk>=1.27",
     "opentelemetry-exporter-otlp-proto-grpc>=1.27",
@@ -21,3 +23,8 @@ dependencies = [
     "opentelemetry-instrumentation-logging>=0.48b0",
     "python-json-logger>=2.0",
 ]
+
+[project.scripts]
+resume-agent  = "agent.main:run"
+resume-cli    = "cli:cli"
+resume-gui    = "profile_manager:main"

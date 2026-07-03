@@ -30,14 +30,14 @@
 \setlength{\fullcollw}{0.47\textwidth}
 
 %custom \section
-\usepackage{titlesec}				
+\usepackage{titlesec}			
 \usepackage{multicol}
 \usepackage{multirow}
 
 %CV Sections inspired by: 
 %http://stefano.italians.nl/archives/26
 \titleformat{\section}{\Large\scshape\raggedright}{}{0em}{}[\titlerule]
-\titlespacing{\section}{0pt}{10pt}{10pt}
+\titlespacing{\section}{0pt}{8pt}{8pt}
 
 %Setup hyperref package, and colours for links
 \usepackage[unicode, draft=false]{hyperref}
@@ -45,21 +45,19 @@
 \hypersetup{colorlinks,breaklinks,urlcolor=linkcolour,linkcolor=linkcolour}
 
 %----------------------------------------------------------------------------------------
-%	BEGIN DOCUMENT
-
-%----------------------------------------------------------------------------------------
 %	CUSTOM ENVIRONMENTS
 %----------------------------------------------------------------------------------------
-% Redesigned to avoid tabularx/minipage compilation errors while maintaining identical visuals
-\newenvironment{joblong}[2]
-    {
-    \noindent\textbf{#1} \hfill #2 \par\vspace{3.50pt}
-    \begin{itemize}[nosep, leftmargin=1em, itemsep=3pt,label=--]
-    }
-    {
-    \end{itemize}
-    \vspace{0.5em}
-    }
+
+% Experience / Project entry with title, date-range, and optional location
+\newenvironment{joblong}[3][]{%
+    \noindent\textbf{#2}%
+    \ifx\relax#1\relax\else{ \textit{\small(#1)}}\fi%
+    \hfill{\small #3} \par\vspace{3pt}%
+    \begin{itemize}[nosep, leftmargin=1.2em, itemsep=2pt, label=--]%
+}{%
+    \end{itemize}%
+    \vspace{0.4em}%
+}
 
 %----------------------------------------------------------------------------------------
 %	BEGIN DOCUMENT
@@ -70,14 +68,14 @@
 \pagestyle{empty} 
 
 %----------------------------------------------------------------------------------------
-%	TITLE
+%	TITLE / CONTACT INFO
 %----------------------------------------------------------------------------------------
 \begin{tabularx}{\linewidth}{@{} C @{}}
-\Huge{\VAR{name}} \\ [7.0pt]
-\BLOCK{if github}\href{https://\VAR{github}}{\VAR{github}} \ $|$ \ \BLOCK{endif}
-\BLOCK{if linkedin}\href{https://\VAR{linkedin}}{\VAR{linkedin}} \ $|$ \ \BLOCK{endif}
-\BLOCK{if website}\href{https://\VAR{website}}{\VAR{website}} \ $|$ \ \BLOCK{endif}
-\BLOCK{if email}\href{mailto:\VAR{email}}{\VAR{email}} \ $|$ \ \BLOCK{endif}
+\Huge{\VAR{name}} \\ [6.0pt]
+\BLOCK{if github}\href{https://\VAR{github}}{\VAR{github}} \ $|$ \ \BLOCK{endif}%
+\BLOCK{if linkedin}\href{https://\VAR{linkedin}}{\VAR{linkedin}} \ $|$ \ \BLOCK{endif}%
+\BLOCK{if website}\href{https://\VAR{website}}{\VAR{website}} \ $|$ \ \BLOCK{endif}%
+\BLOCK{if email}\href{mailto:\VAR{email}}{\VAR{email}} \ $|$ \ \BLOCK{endif}%
 \BLOCK{if phone}\href{tel:\VAR{phone}}{\VAR{phone}}\BLOCK{endif} \\
 \end{tabularx}
 
@@ -96,7 +94,7 @@
 \section{Work Experience}
 
 \BLOCK{for exp in experience}
-\begin{joblong}{\VAR{exp.title} @ \VAR{exp.company}}{\VAR{exp.start_date} - \VAR{exp.end_date}}
+\begin{joblong}[\VAR{exp.location}]{\VAR{exp.title} @ \VAR{exp.company}}{\VAR{exp.start_date} -- \VAR{exp.end_date}}
 \BLOCK{for bullet in exp.bullets}
 \item \VAR{bullet}
 \BLOCK{endfor}
@@ -113,7 +111,7 @@
 
 \BLOCK{for proj in projects}
 \begin{joblong}{\VAR{proj.name}}{\BLOCK{if proj.technologies}\VAR{proj.technologies}\BLOCK{endif}}
-\BLOCK{if proj.description}\item \VAR{proj.description}\BLOCK{endif}
+\BLOCK{if proj.description}\item \textit{\VAR{proj.description}}\BLOCK{endif}
 \BLOCK{for bullet in proj.bullets}
 \item \VAR{bullet}
 \BLOCK{endfor}
@@ -139,7 +137,7 @@
 %----------------------------------------------------------------------------------------
 \BLOCK{if achievements}
 \section{Achievements}
-\begin{itemize}[nosep, leftmargin=1em, itemsep=3pt,label=--]
+\begin{itemize}[nosep, leftmargin=1.2em, itemsep=2pt, label=--]
 \BLOCK{for ach in achievements}
 \item \VAR{ach}
 \BLOCK{endfor}
@@ -151,7 +149,7 @@
 %----------------------------------------------------------------------------------------
 \BLOCK{if certifications}
 \section{Certifications}
-\begin{itemize}[nosep, leftmargin=1em, itemsep=3pt,label=--]
+\begin{itemize}[nosep, leftmargin=1.2em, itemsep=2pt, label=--]
 \BLOCK{for cert in certifications}
 \item \VAR{cert}
 \BLOCK{endfor}
@@ -165,7 +163,7 @@
 \section{Education}
 \begin{tabularx}{\linewidth}{@{}l X@{}}	
 \BLOCK{for edu in education}
-\BLOCK{if edu.start_date}\VAR{edu.start_date} - \BLOCK{endif}\VAR{edu.end_date} & \textbf{\VAR{edu.degree}}\BLOCK{if edu.field} in \VAR{edu.field}\BLOCK{endif} at \textbf{\VAR{edu.institution}} \BLOCK{if edu.gpa}\hfill (GPA: \VAR{edu.gpa})\BLOCK{endif} \\ 
+\BLOCK{if edu.start_date}\VAR{edu.start_date} -- \BLOCK{endif}\VAR{edu.end_date} & \textbf{\VAR{edu.degree}}\BLOCK{if edu.field} in \VAR{edu.field}\BLOCK{endif} at \textbf{\VAR{edu.institution}} \BLOCK{if edu.gpa}\hfill (GPA: \VAR{edu.gpa})\BLOCK{endif} \\ 
 \BLOCK{for highlight in edu.highlights}
 & \small{\VAR{highlight}} \\
 \BLOCK{endfor}
@@ -174,5 +172,8 @@
 \BLOCK{endif}
 
 \vfill
+\begin{center}
+\footnotesize{Last updated: \VAR{render_timestamp}}
+\end{center}
 
 \end{document}

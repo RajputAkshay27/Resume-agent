@@ -17,6 +17,20 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("storage-service")
 
+# Security constants
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB
+
+
+def _validate_key(key: str) -> str:
+    """Validate an S3 object key to prevent path traversal attacks."""
+    if not key or not key.strip():
+        raise ValueError("Storage key must not be empty.")
+    if ".." in key:
+        raise ValueError(f"Storage key contains path traversal: {key!r}")
+    if key.startswith("/"):
+        raise ValueError(f"Storage key must not be an absolute path: {key!r}")
+    return key.strip()
+
 # S3 Configuration
 S3_ENDPOINT = os.getenv("S3_ENDPOINT", "http://localhost:3900")
 S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY", "")
@@ -105,22 +119,34 @@ async def upload_file(file: UploadFile = File(...), key: Optional[str] = Form(No
     """Upload a file using multipart/form-data."""
     target_key = key or file.filename
     try:
+        _validate_key(target_key)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    # Enforce size limit
+    content = await file.read()
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"Upload exceeds {MAX_UPLOAD_BYTES // (1024*1024)} MB limit.")
+    try:
+        import io
         s3.upload_fileobj(
-            file.file,
+            io.BytesIO(content),
             S3_BUCKET,
             target_key,
             ExtraArgs={"ContentType": file.content_type}
         )
         return {"key": target_key, "success": True}
     except Exception as e:
-        logger.error(f"Upload error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Upload error", extra={"error": str(e), "key": target_key})
+        raise HTTPException(status_code=500, detail="Upload failed.")
 
 @app.post("/upload-base64", dependencies=[Depends(verify_api_key)])
 async def upload_base64(req: UploadB64Request):
     """Upload a file using base64 encoded content."""
     try:
+        _validate_key(req.key)
         content = base64.b64decode(req.content_b64)
+        if len(content) > MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail=f"Upload exceeds {MAX_UPLOAD_BYTES // (1024*1024)} MB limit.")
         s3.put_object(
             Bucket=S3_BUCKET,
             Key=req.key,
@@ -128,9 +154,11 @@ async def upload_base64(req: UploadB64Request):
             ContentType=req.content_type
         )
         return {"key": req.key, "success": True}
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Base64 Upload error: {e}")
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.error("Base64 upload error", extra={"error": str(e), "key": req.key})
+        raise HTTPException(status_code=500, detail="Upload failed.") from e
 
 @app.get("/download/{key:path}", dependencies=[Depends(verify_api_key)])
 async def download_file(key: str):
@@ -153,8 +181,8 @@ async def delete_file(key: str):
         s3.delete_object(Bucket=S3_BUCKET, Key=key)
         return {"success": True}
     except Exception as e:
-        logger.error(f"Delete error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Delete error", extra={"error": str(e), "key": key})
+        raise HTTPException(status_code=500, detail="Delete failed.")
 
 @app.post("/copy", dependencies=[Depends(verify_api_key)])
 async def copy_file(req: CopyRequest):

@@ -1,13 +1,15 @@
 """
-Jinja2 LaTeX Template Bridge for the Resume Agent.
+Jinja2 LaTeX Template Bridge for the Resume Agent v2.
 
 Handles:
 - LaTeX special character escaping
 - Bold marker conversion (**text** → \\textbf{text})
 - Dual delimiter support (standard {{ }} and LaTeX-safe \\VAR{})
 - Template validation
-- Template rendering with Pydantic data
+- Template rendering with Pydantic data (supports FullResume compositor)
+- Jinja2 template caching (keyed by content hash)
 - PDF compilation via pdflatex
+- LaTeX sanitization integration (via guardrails.sanitize_latex)
 """
 
 import os
@@ -19,7 +21,23 @@ from typing import Any
 
 import jinja2
 
-from schemas import TailoredResume
+import datetime
+import hashlib
+import logging
+import os
+import subprocess
+import tempfile
+from typing import Any, Union
+
+import jinja2
+
+try:
+    from guardrails import sanitize_latex as _sanitize_latex
+except ImportError:
+    def _sanitize_latex(tex: str) -> str:  # type: ignore[misc]
+        return tex
+
+from schemas import FullResume, TailoredResume
 
 logger = logging.getLogger(__name__)
 
@@ -220,6 +238,30 @@ def validate_template(template_content: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Template cache — keyed by MD5 of template content
+# ---------------------------------------------------------------------------
+
+_template_cache: dict[str, jinja2.Template] = {}
+
+
+def _get_cached_template(template_content: str) -> jinja2.Template:
+    """
+    Return a parsed Jinja2 Template object, reusing the cached version if
+    the content has not changed.
+
+    Keyed by MD5 hash of the template string. For most resume runs the
+    template doesn't change between calls, so this avoids re-parsing.
+    """
+    content_hash = hashlib.md5(template_content.encode("utf-8")).hexdigest()
+    if content_hash not in _template_cache:
+        style = detect_delimiter_style(template_content)
+        env = create_jinja_env(style)
+        _template_cache[content_hash] = env.from_string(template_content)
+        logger.debug("Template parsed and cached (hash=%s).", content_hash)
+    return _template_cache[content_hash]
+
+
+# ---------------------------------------------------------------------------
 # Data preparation helpers
 # ---------------------------------------------------------------------------
 
@@ -257,10 +299,20 @@ def _strip_url_protocol(url: str) -> str:
     return url
 
 
-def _prepare_template_data(tailored_data: TailoredResume) -> dict:
-    """Convert a TailoredResume to a dict suitable for Jinja2 rendering.
+def _prepare_template_data(tailored_data: Union["FullResume", TailoredResume]) -> dict:
     """
-    raw = tailored_data.model_dump()
+    Convert a FullResume or TailoredResume to a flat dict for Jinja2 rendering.
+
+    If a FullResume is provided, it calls flatten() to merge the StaticProfile
+    and TailoredSections into a single dict. This is the preferred path in v2.
+
+    If a TailoredResume (v1 compat) is provided, model_dump() is called directly.
+    """
+    # v2 path: FullResume compositor
+    if hasattr(tailored_data, 'flatten'):
+        raw = tailored_data.flatten()
+    else:
+        raw = tailored_data.model_dump()
 
     # Normalize link fields: strip protocol prefix to avoid double https://
     for link_field in ("github", "linkedin", "website"):
@@ -291,25 +343,30 @@ def _prepare_template_data(tailored_data: TailoredResume) -> dict:
 # Template rendering
 # ---------------------------------------------------------------------------
 
-def render_resume(template_content: str, tailored_data: TailoredResume) -> str:
-    """Render a Jinja2 LaTeX template with tailored resume data.
+def render_resume(template_content: str, tailored_data: Union["FullResume", TailoredResume]) -> str:
+    """
+    Render a Jinja2 LaTeX template with tailored resume data.
 
     Args:
         template_content: The raw Jinja2 .tex template string.
-        tailored_data: The validated TailoredResume Pydantic object.
+        tailored_data:    A FullResume (v2) or TailoredResume (v1 compat) object.
 
     Returns:
         The final .tex string ready for pdflatex compilation.
     """
-    style = detect_delimiter_style(template_content)
-    env = create_jinja_env(style)
-
-    template = env.from_string(template_content)
+    template = _get_cached_template(template_content)
     data = _prepare_template_data(tailored_data)
 
-    # DEBUG: Print exact keys and value types being passed to Jinja2
-    debug_info = {k: (len(v) if isinstance(v, (str, list, dict)) else v) for k, v in data.items()}
-    logger.info("RENDER_RESUME: Passing data to Jinja2: %s", debug_info)
+    # Inject render metadata
+    data["render_timestamp"] = datetime.datetime.now().strftime("%B %Y")
+
+    logger.info(
+        "Rendering resume for: %s | sections: exp=%d, proj=%d, skills=%d",
+        data.get("name", "(no name)"),
+        len(data.get("experience", [])),
+        len(data.get("projects", [])),
+        len(data.get("skills", {})),
+    )
 
     rendered = template.render(**data)
     return rendered
@@ -322,6 +379,9 @@ def render_resume(template_content: str, tailored_data: TailoredResume) -> str:
 def compile_pdf(tex_content: str, output_dir: str | None = None) -> str:
     """Compile a .tex string to PDF using pdflatex.
 
+    Security: sanitize_latex() is applied first to strip dangerous commands
+    such as \\write18, \\input, \\openout that could allow code execution.
+
     Args:
         tex_content: The complete LaTeX source.
         output_dir: Directory to write files in. If None, a temp dir is created.
@@ -332,6 +392,9 @@ def compile_pdf(tex_content: str, output_dir: str | None = None) -> str:
     Raises:
         RuntimeError: If pdflatex fails to produce a PDF.
     """
+    # Security: remove dangerous LaTeX commands before compilation
+    tex_content = _sanitize_latex(tex_content)
+
     if output_dir is None:
         output_dir = tempfile.mkdtemp(prefix="resume_")
 
@@ -343,20 +406,28 @@ def compile_pdf(tex_content: str, output_dir: str | None = None) -> str:
         f.write(tex_content)
 
     # Run pdflatex 3 times for full convergence
+    # timeout=30 seconds per run to prevent runaway compilation
     for i in range(3):
-        process = subprocess.run(
-            [
-                "pdflatex",
-                "-interaction=nonstopmode",
-                "-halt-on-error",
-                "-file-line-error",
-                "resume.tex",
-            ],
-            cwd=output_dir,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+        try:
+            process = subprocess.run(
+                [
+                    "pdflatex",
+                    "-interaction=nonstopmode",
+                    "-halt-on-error",
+                    "-file-line-error",
+                    "resume.tex",
+                ],
+                cwd=output_dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(
+                "pdflatex compilation timed out after 30 seconds. "
+                "The template may contain an infinite loop or be excessively complex."
+            )
 
     if not os.path.exists(pdf_path):
         logger.error("pdflatex failed.\nSTDOUT: %s\nSTDERR: %s", process.stdout, process.stderr)

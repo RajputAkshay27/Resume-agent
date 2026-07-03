@@ -1,452 +1,349 @@
-import uvicorn
-import os
+"""
+main.py — FastAPI server for the Resume Builder Agent v2.
+
+Serves:
+  - POST /api/tailor           Stateless tailoring + compilation endpoint.
+  - POST /api/profile          Upload/update master profile.
+  - GET  /api/profile          Retrieve current master profile.
+  - POST /api/job-description  Upload/update job description.
+  - GET  /api/job-description  Retrieve current job description.
+  - POST /api/template         Upload new template version.
+  - GET  /api/templates        List template versions.
+  - GET  /api/template/{ver}   Retrieve specific template version.
+  - POST /validate-template    Validate a Jinja2 LaTeX template.
+  - GET  /health               Health check.
+
+Security:
+  - CORS restricted to configurable allowed origins (not wildcard in production).
+  - API key authentication for all management endpoints.
+  - Request size limit (1MB payload max).
+  - Startup validation — fails fast if GOOGLE_API_KEY is missing.
+  - Error responses sanitized (no stack traces in production).
+"""
+
+import base64
 import json
 import logging
-import urllib.request
-from fastapi import FastAPI, HTTPException, Request
+import os
+import uuid
+import tempfile
+
+import uvicorn
+from fastapi import FastAPI, HTTPException, Request, Header, Depends
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel as PydanticBaseModel
+from dotenv import load_dotenv
+
 from logging_config import setup_logging
 from agent import create_agent
-from dotenv import load_dotenv
-from ag_ui_adk import ADKAgent, add_adk_fastapi_endpoint
-from google.adk.sessions.sqlite_session_service import SqliteSessionService
-
-from typing import Optional
-import uuid
-import tempfile
-import base64
-
 from latex_bridge import validate_template
+from storage_client import storage as _get_storage
 
-# Set up structured JSON logging FIRST — before anything that touches logging
+# Structured JSON logging FIRST — before anything that touches logging
 setup_logging("agent")
 logger = logging.getLogger(__name__)
+
+load_dotenv()
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+DEBUG = os.getenv("DEBUG", "false").lower() == "true"
+
+# API key for management endpoints (profile/JD/template upload)
+MANAGEMENT_API_KEY = os.getenv("INTERNAL_API_KEY", "")
+if not MANAGEMENT_API_KEY:
+    logger.warning(
+        "INTERNAL_API_KEY is not set. Management endpoints are unprotected. "
+        "Set INTERNAL_API_KEY in your .env file."
+    )
+
+# Allowed CORS origins — default to localhost only
+_RAW_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:8000")
+ALLOWED_ORIGINS = [o.strip() for o in _RAW_ORIGINS.split(",") if o.strip()]
+
+# Max request body size (bytes)
+MAX_REQUEST_BYTES = int(os.getenv("MAX_REQUEST_BYTES", str(1 * 1024 * 1024)))  # 1 MB
+
+
+# ---------------------------------------------------------------------------
+# Auth dependency
+# ---------------------------------------------------------------------------
+
+async def require_api_key(x_api_key: str = Header(default="")):
+    """Require a valid INTERNAL_API_KEY header for management endpoints."""
+    if MANAGEMENT_API_KEY and x_api_key != MANAGEMENT_API_KEY:
+        raise HTTPException(status_code=403, detail="Forbidden: Invalid API key.")
+    return x_api_key
+
+
+# ---------------------------------------------------------------------------
+# Request models
+# ---------------------------------------------------------------------------
+
+class ProfileRequest(PydanticBaseModel):
+    profile: dict
+
+
+class JobDescriptionRequest(PydanticBaseModel):
+    content: str
+
+
+class TemplateRequest(PydanticBaseModel):
+    content: str
+    label: str = ""
 
 
 class ValidateTemplateRequest(PydanticBaseModel):
     template_content: str
 
 
+class TailorRequest(PydanticBaseModel):
+    master_profile: dict | None = None
+    job_description: str | None = None
+    preferences: dict | None = None
+    template_content: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Application factory
+# ---------------------------------------------------------------------------
+
 def run():
+    # Startup validation
+    if not os.getenv("GOOGLE_API_KEY"):
+        raise EnvironmentError(
+            "GOOGLE_API_KEY environment variable is required. "
+            "Set it in agent/.env or export it in your shell."
+        )
+
     agent = create_agent()
 
-    # Use SQLite for persistent session storage across restarts
-    # Ensure the data directory exists
+    from google.adk.sessions.sqlite_session_service import SqliteSessionService
     os.makedirs("data", exist_ok=True)
     session_service = SqliteSessionService("sqlite:///data/sessions.db")
 
-    resume_building_agent = ADKAgent(
-        adk_agent=agent,
-        app_name="resume_builder_agent",
-        session_timeout_seconds=3600,
-        cleanup_interval_seconds=360000,
-        session_service=session_service,
-        use_in_memory_services=False
+    app = FastAPI(
+        title="Resume Builder Agent v2",
+        description="AI-powered resume tailoring API with ATS optimization.",
+        version="2.0.0",
     )
 
-    app = FastAPI(title='Resume Builder Agent - Multi-Agent Pipeline')
+    # ── Middleware ─────────────────────────────────────────────────────────
 
-    # Allow Next.js frontend to call endpoints directly
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=ALLOWED_ORIGINS,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "DELETE"],
+        allow_headers=["Content-Type", "Authorization", "X-API-Key"],
     )
 
-    # Initialise OTel SDK (traces + metrics + auto-instrumentation)
+    # ── Telemetry ──────────────────────────────────────────────────────────
+
     from telemetry import setup_telemetry
     setup_telemetry(app)
 
-    # ------------------------------------------------------------------
-    # Global exception handler — catch unhandled errors before they
-    # corrupt the SSE event stream with unexpected 500 responses
-    # ------------------------------------------------------------------
+    # ── Global exception handler ───────────────────────────────────────────
+
     @app.exception_handler(Exception)
     async def global_exception_handler(request: Request, exc: Exception):
         logger.error(
             "Unhandled exception on %s %s",
             request.method, str(request.url),
             exc_info=True,
-            extra={"error": str(exc)},
         )
-        return JSONResponse(
-            status_code=500,
-            content={"error": "Internal Server Error", "detail": str(exc)},
-        )
+        # In production, do not expose internal details
+        detail = str(exc) if DEBUG else "Internal Server Error"
+        return JSONResponse(status_code=500, content={"error": detail})
 
-    # ------------------------------------------------------------------
-    # GET /history — Chat history for CopilotKit
-    # ------------------------------------------------------------------
-    @app.get("/history")
-    async def get_history(threadId: str = None):
-        """Return the chat history for a given CopilotKit threadId."""
-        if not threadId:
-            return JSONResponse(content={"messages": []})
+    # ── Request size guard ─────────────────────────────────────────────────
 
-        AGENT_NAME = "resume_builder_agent"
-        user_id = f"thread_user_{threadId}"
-        logger.debug("Fetching history", extra={"thread_id": threadId, "user_id": user_id})
-
-        # --- SESSION LOGGING START ---
-        # As requested: List all sessions and the number of events in them
-        try:
-            all_sessions_response = await session_service.list_sessions(app_name=AGENT_NAME)
-            all_sessions = all_sessions_response.sessions if all_sessions_response and all_sessions_response.sessions else []
-            logger.debug("Session count", extra={"total_sessions": len(all_sessions)})
-            for s in all_sessions:
-                try:
-                    full_session = await session_service.get_session(
-                        app_name=AGENT_NAME, user_id=s.user_id, session_id=s.id
-                    )
-                    event_count = len(getattr(full_session, "events", []) or [])
-                    logger.debug(
-                        "Session summary",
-                        extra={"session_id": s.id, "user_id": s.user_id, "event_count": event_count},
-                    )
-                except Exception as sess_err:
-                    logger.warning("Error reading session", extra={"session_id": s.id, "error": str(sess_err)})
-        except Exception as e:
-            logger.warning("Failed to list all sessions", extra={"error": str(e)})
-        # --- SESSION LOGGING END ---
-
-        # Heuristic phrases that indicate agent reasoning rather than user-facing response
-        SKIP_PHRASES = [
-            "The user wants", "According to the", "Following my", "Plan:", 
-            "Step 1:", "I will now", "I must:", "My workflow is:", 
-            "Looking at the context", "The read_state call", "I will call", 
-            "I encountered an internal", "Corrected Payload Construction:", 
-            "The previous submission failed"
-        ]
-
-        def extract_text(content):
-            """Safely extract and clean user-facing text from complex AG-UI content."""
-            if not content:
-                return ""
-            if isinstance(content, str):
-                return content
-            
-            parts = []
-            if hasattr(content, "parts") and content.parts:
-                parts = content.parts
-            elif isinstance(content, dict):
-                parts = content.get("parts", [])
-            
-            if not parts:
-                try: 
-                    return str(content) if not isinstance(content, dict) else ""
-                except: 
-                    return ""
-
-            if not isinstance(parts, (list, tuple)):
-                parts = [parts]
-
-            text_bits = []
-            for p in parts:
-                if not p: continue
-                try:
-                    # 1. Broad metadata check for thoughts/tool-calls
-                    is_internal = False
-                    if isinstance(p, dict):
-                        is_internal = any(p.get(k) for k in ["thought", "function_call", "function_response", "invocation_id"])
-                    else:
-                        is_internal = any(getattr(p, k, None) for k in ["thought", "function_call", "function_response", "invocation_id"])
-                    
-                    if is_internal:
-                        continue
-
-                    # 2. String conversion
-                    val = None
-                    if isinstance(p, str): 
-                        val = p
-                    elif hasattr(p, "text"): 
-                        val = getattr(p, "text", None)
-                    elif isinstance(p, dict): 
-                        val = p.get("text") or p.get("content")
-                    
-                    if val is not None:
-                        val_str = str(val).strip()
-                        # 3. Heuristic Skip
-                        if any(val_str.startswith(phrase) for phrase in SKIP_PHRASES):
-                            continue
-                        text_bits.append(val_str)
-                except:
-                    continue
-
-            return "\n".join([t for t in text_bits if t]).strip()
-
-        try:
-            # 1. Fetch ALL sessions for this thread user
-            response = await session_service.list_sessions(app_name=AGENT_NAME, user_id=user_id)
-            sessions = response.sessions if (response and response.sessions) else []
-
-            if not sessions:
-                return JSONResponse(content={"messages": []})
-
-            # 2. Collect & deduplicate events from EVERY session
-            seen_ids = set()
-            all_events = []
-            
-            for s in sessions:
-                try:
-                    full_s = await session_service.get_session(
-                        app_name=AGENT_NAME, user_id=user_id, session_id=s.id
-                    )
-                    if not full_s:
-                        continue
-                        
-                    for ev in (getattr(full_s, "events", []) or []):
-                        ev_id = getattr(ev, "id", None)
-                        if ev_id and ev_id in seen_ids:
-                            continue
-                        if ev_id:
-                            seen_ids.add(ev_id)
-                        all_events.append(ev)
-                except Exception:
-                    continue
-
-            logger.debug(
-                "Processing events",
-                extra={"thread_id": threadId, "total_events": len(all_events), "sessions": len(sessions)},
+    @app.middleware("http")
+    async def limit_request_size(request: Request, call_next):
+        content_length = request.headers.get("content-length")
+        if content_length and int(content_length) > MAX_REQUEST_BYTES:
+            return JSONResponse(
+                status_code=413,
+                content={"error": f"Request body too large. Maximum is {MAX_REQUEST_BYTES // 1024} KB."},
             )
+        return await call_next(request)
 
-            # ==========================================
-            # THE FIX: SORT EVENTS CHRONOLOGICALLY
-            # ==========================================
-            def get_timestamp(event):
-                # Try common timestamp attributes from Google Agent SDKs
-                ts = getattr(event, "create_time", None) or getattr(event, "timestamp", None)
-                if isinstance(ts, dict): # Handle protobuf timestamp dicts if applicable
-                    return ts.get("seconds", 0)
-                return ts or 0
+    # ── Health ─────────────────────────────────────────────────────────────
 
-            # Sort from oldest to newest so the UI renders top-to-bottom correctly
-            all_events.sort(key=get_timestamp)
+    @app.get("/health")
+    async def health():
+        return {"status": "ok", "version": "2.0.0"}
 
-            # 3. Process events into clean user-facing messages
-            messages = []
-            for event in all_events:
-                try:
-                    author = getattr(event, "author", None)
-                    if not author:
-                        continue
+    # ── Profile management ─────────────────────────────────────────────────
 
-                    is_p = getattr(event, "partial", False) if not isinstance(event, dict) else event.get("partial", False)
-                    is_t = getattr(event, "thought", False) if not isinstance(event, dict) else event.get("thought", False)
-                    if is_p or is_t:
-                        continue
-
-                    if author in ["compilation_agent", "tailoring_agent"] and is_p:
-                        continue
-
-                    text = extract_text(getattr(event, "content", None) if not isinstance(event, dict) else event.get("content"))
-                    if not text:
-                        continue
-
-                    role = "user" if author == "user" else "assistant"
-                    messages.append({
-                        "id": getattr(event, "id", None) or f"{role}-{len(messages)}",
-                        "role": role,
-                        "content": text,
-                    })
-                except Exception:
-                    continue
-
-            logger.info(
-                "History recovered",
-                extra={"thread_id": threadId, "message_count": len(messages)},
-            )
-            return JSONResponse(content={"messages": messages})
-
+    @app.post("/api/profile", dependencies=[Depends(require_api_key)])
+    async def upload_profile(req: ProfileRequest):
+        """Upload or update the master profile."""
+        if not req.profile:
+            raise HTTPException(status_code=400, detail="Profile must not be empty.")
+        try:
+            _get_storage().save_profile(req.profile)
+            return {"success": True, "message": "Profile saved."}
         except Exception as e:
-            logger.error("History failure", exc_info=True, extra={"error": str(e)})
-            return JSONResponse(content={"messages": [], "error": str(e)})
+            logger.error("Profile upload error: %s", e, exc_info=True)
+            raise HTTPException(status_code=500, detail="Failed to save profile.")
 
-    # ------------------------------------------------------------------
-    # POST /validate-template — Validate a Jinja2 template
-    # ------------------------------------------------------------------
+    @app.get("/api/profile")
+    async def get_profile():
+        """Retrieve the current master profile."""
+        profile = _get_storage().load_profile()
+        if not profile:
+            raise HTTPException(status_code=404, detail="No profile set.")
+        return {"profile": profile}
+
+    # ── Job description management ─────────────────────────────────────────
+
+    @app.post("/api/job-description", dependencies=[Depends(require_api_key)])
+    async def upload_job_description(req: JobDescriptionRequest):
+        """Upload or update the job description."""
+        if not req.content or not req.content.strip():
+            raise HTTPException(status_code=400, detail="Job description must not be empty.")
+        try:
+            _get_storage().save_job_description(req.content.strip())
+            return {"success": True, "message": "Job description saved."}
+        except Exception as e:
+            logger.error("JD upload error: %s", e, exc_info=True)
+            raise HTTPException(status_code=500, detail="Failed to save job description.")
+
+    @app.get("/api/job-description")
+    async def get_job_description():
+        """Retrieve the current job description."""
+        jd = _get_storage().load_job_description()
+        if not jd:
+            raise HTTPException(status_code=404, detail="No job description set.")
+        return {"content": jd}
+
+    # ── Template management ────────────────────────────────────────────────
+
+    @app.post("/api/template", dependencies=[Depends(require_api_key)])
+    async def upload_template(req: TemplateRequest):
+        """Upload a new LaTeX template version."""
+        if not req.content or not req.content.strip():
+            raise HTTPException(status_code=400, detail="Template content must not be empty.")
+        try:
+            version = _get_storage().save_template(req.content, label=req.label)
+            return {"success": True, "version": version}
+        except Exception as e:
+            logger.error("Template upload error: %s", e, exc_info=True)
+            raise HTTPException(status_code=500, detail="Failed to save template.")
+
+    @app.get("/api/templates")
+    async def list_templates():
+        """List all template versions."""
+        return {"templates": _get_storage().list_templates()}
+
+    @app.get("/api/template/{version}")
+    async def get_template(version: int):
+        """Retrieve a specific template version."""
+        content = _get_storage().load_template(version)
+        if not content:
+            raise HTTPException(status_code=404, detail=f"Template version {version} not found.")
+        return {"version": version, "content": content}
+
+    # ── Template validation ────────────────────────────────────────────────
+
     @app.post("/validate-template")
     async def validate_template_endpoint(req: ValidateTemplateRequest):
         """Validate a Jinja2 LaTeX template and return analysis."""
         result = validate_template(req.template_content)
         return JSONResponse(content=result)
-    # ------------------------------------------------------------------
-    # POST /api/tailor — Direct stateless resume tailoring and compilation
-    # ------------------------------------------------------------------
-    class TailorRequest(PydanticBaseModel):
-        master_profile: Optional[dict] = None
-        job_description: Optional[str] = None
-        preferences: Optional[dict] = None
-        template_content: Optional[str] = None
+
+    # ── Stateless tailoring API ────────────────────────────────────────────
 
     @app.post("/api/tailor")
     async def api_tailor(req: TailorRequest):
-        # 1. Create a temp directory to hold the inputs and output
-        temp_dir = tempfile.mkdtemp(prefix="resume_tailor_")
-        
-        # Preserve original env variables
-        orig_env = {
-            "MASTER_PROFILE_PATH": os.getenv("MASTER_PROFILE_PATH"),
-            "JOB_DESCRIPTION_PATH": os.getenv("JOB_DESCRIPTION_PATH"),
-            "PREFERENCES_PATH": os.getenv("PREFERENCES_PATH"),
-            "RESUME_TEMPLATE_PATH": os.getenv("RESUME_TEMPLATE_PATH"),
-            "OUTPUT_DIR": os.getenv("OUTPUT_DIR"),
-        }
-        
-        try:
-            # Write inputs to temp directory
-            master_profile_path = os.path.join(temp_dir, "master_profile.json")
-            job_description_path = os.path.join(temp_dir, "job_description.txt")
-            preferences_path = os.path.join(temp_dir, "preferences.json")
-            template_path = os.path.join(temp_dir, "resume_template.tex")
-            
-            # Load local fallbacks if not provided in the request
-            master_profile = req.master_profile
-            if not master_profile:
-                from tools import _load_local_profile
-                master_profile = _load_local_profile()
-                
-            job_description = req.job_description
-            if not job_description:
-                from tools import _load_local_jd
-                job_description = _load_local_jd()
-                
-            preferences = req.preferences
-            if not preferences:
-                from tools import _load_local_prefs
-                preferences = _load_local_prefs()
-                
-            template_content = req.template_content
-            if not template_content:
-                from tools import _load_local_template
-                template_content = _load_local_template()
+        """
+        Stateless resume tailoring + compilation.
 
-            if not master_profile:
-                raise HTTPException(status_code=400, detail="Master profile is empty or not found.")
-            if not job_description:
-                raise HTTPException(status_code=400, detail="Job description is empty or not found.")
-            if not template_content:
-                raise HTTPException(status_code=400, detail="Template content is empty or not found.")
+        Accepts profile/JD/preferences/template in the request body.
+        Falls back to database values for any missing fields.
+        """
+        store = _get_storage()
 
-            # Save files to temp dir
-            with open(master_profile_path, "w", encoding="utf-8") as f:
-                json.dump(master_profile, f, indent=2)
-            with open(job_description_path, "w", encoding="utf-8") as f:
-                f.write(job_description)
-            with open(preferences_path, "w", encoding="utf-8") as f:
-                json.dump(preferences or {}, f, indent=2)
-            with open(template_path, "w", encoding="utf-8") as f:
-                f.write(template_content)
+        # Resolve inputs — request body takes priority, fall back to database
+        master_profile = req.master_profile or store.load_profile()
+        job_description = req.job_description or store.load_job_description()
+        preferences = req.preferences or store.load_preferences() or {}
+        template_content = req.template_content or store.load_template()
 
-            # Override env variables
-            os.environ["MASTER_PROFILE_PATH"] = master_profile_path
-            os.environ["JOB_DESCRIPTION_PATH"] = job_description_path
-            os.environ["PREFERENCES_PATH"] = preferences_path
-            os.environ["RESUME_TEMPLATE_PATH"] = template_path
-            os.environ["OUTPUT_DIR"] = temp_dir
-            
-            # Temporarily clear FRONTEND_URL to force local fallback
-            orig_frontend_url = os.environ.get("FRONTEND_URL")
-            if "FRONTEND_URL" in os.environ:
-                del os.environ["FRONTEND_URL"]
+        if not master_profile:
+            raise HTTPException(status_code=400, detail="No master profile found. Upload one first.")
+        if not job_description:
+            raise HTTPException(status_code=400, detail="No job description found. Upload one first.")
+        if not template_content:
+            raise HTTPException(status_code=400, detail="No LaTeX template found. Upload one first.")
 
-            # 2. Run the agent using the ADK Runner
-            from google.adk import Runner
-            from google.genai import types
-            
-            # Create runner
-            runner = Runner(
-                app_name="resume_builder_agent",
-                agent=agent,
-                session_service=session_service,
-                auto_create_session=True,
-            )
-            
-            session_id = str(uuid.uuid4())
-            user_id = f"thread_user_{session_id}"
-            
-            logger.info("Starting local tailoring agent run...")
-            
-            async for event in runner.run_async(
-                user_id=user_id,
-                session_id=session_id,
-                new_message=types.Content(parts=[types.Part.from_text(text="Tailor my resume for the job description and compile the final PDF.")]),
-            ):
-                logger.debug("Tailor run event: %s", event)
+        # Write inputs temporarily if they differ from stored values
+        if req.master_profile:
+            store.save_profile(req.master_profile)
+        if req.job_description:
+            store.save_job_description(req.job_description)
+        if req.preferences:
+            store.save_preferences(req.preferences)
+        if req.template_content:
+            store.save_template(req.template_content, label="api_upload")
 
-            # Restore FRONTEND_URL if it was set
-            if orig_frontend_url is not None:
-                os.environ["FRONTEND_URL"] = orig_frontend_url
+        # Run the agent
+        from google.adk import Runner
+        from google.genai import types
 
-            # 3. Read output files
-            tex_path = os.path.join(temp_dir, "resume.tex")
-            pdf_path = os.path.join(temp_dir, "resume.pdf")
-            
-            if not os.path.exists(tex_path):
-                session = await session_service.get_session(app_name="resume_builder_agent", user_id=user_id, session_id=session_id)
-                tailored_resume = session.state.get("tailored_resume") if session else None
-                if tailored_resume:
-                    from latex_bridge import render_resume, compile_pdf
-                    try:
-                        from schemas import TailoredResume
-                        validated_resume = TailoredResume(**tailored_resume)
-                        rendered_tex = render_resume(template_content, validated_resume)
-                        with open(tex_path, "w", encoding="utf-8", newline="") as f:
-                            f.write(rendered_tex)
-                        try:
-                            pdf_path = compile_pdf(rendered_tex, temp_dir)
-                        except Exception as e:
-                            logger.warning("Post-run compilation failed: %s", e)
-                    except Exception as e:
-                        raise HTTPException(status_code=500, detail=f"Failed to generate LaTeX from tailored resume state: {e}")
-                else:
-                    raise HTTPException(status_code=500, detail="Tailoring agent completed but did not produce a tailored resume.")
+        runner = Runner(
+            app_name="resume_builder_agent",
+            agent=agent,
+            session_service=session_service,
+            auto_create_session=True,
+        )
+        session_id = str(uuid.uuid4())
+        user_id = f"api_user_{session_id}"
 
-            # Read generated files
+        async for _ in runner.run_async(
+            user_id=user_id,
+            session_id=session_id,
+            new_message=types.Content(parts=[types.Part.from_text(
+                text="Tailor my resume for the job description and compile the final PDF."
+            )]),
+        ):
+            pass
+
+        session = await session_service.get_session(
+            app_name="resume_builder_agent",
+            user_id=user_id,
+            session_id=session_id,
+        )
+
+        tailored = None
+        if session:
+            tailored = session.state.get("tailored_sections") or session.state.get("tailored_resume")
+
+        # Read output files
+        output_dir = os.getenv("OUTPUT_DIR", "output")
+        tex_path = os.path.join(output_dir, "resume.tex")
+        pdf_path = os.path.join(output_dir, "resume.pdf")
+
+        rendered_tex = ""
+        if os.path.exists(tex_path):
             with open(tex_path, "r", encoding="utf-8") as f:
                 rendered_tex = f.read()
-                
-            pdf_base64 = None
-            if os.path.exists(pdf_path):
-                with open(pdf_path, "rb") as f:
-                    pdf_base64 = base64.b64encode(f.read()).decode("utf-8")
-                    
-            # Read final state from session service
-            session = await session_service.get_session(app_name="resume_builder_agent", user_id=user_id, session_id=session_id)
-            tailored_resume = session.state.get("tailored_resume") if session else {}
 
-            return {
-                "tailored_resume": tailored_resume,
-                "rendered_tex": rendered_tex,
-                "compiled_pdf_base64": pdf_base64,
-                "success": True
-            }
+        pdf_base64 = None
+        if os.path.exists(pdf_path):
+            with open(pdf_path, "rb") as f:
+                pdf_base64 = base64.b64encode(f.read()).decode("utf-8")
 
-        except Exception as e:
-            logger.error("Stateless tailoring API error: %s", e, exc_info=True)
-            raise HTTPException(status_code=500, detail=str(e))
-            
-        finally:
-            # Restore original environment
-            for k, v in orig_env.items():
-                if v is None:
-                    if k in os.environ:
-                        del os.environ[k]
-                else:
-                    os.environ[k] = v
-                    
-            # Clean up temp directory
-            try:
-                import shutil
-                shutil.rmtree(temp_dir, ignore_errors=True)
-            except Exception:
-                pass
-
-    # IMPORTANT: mount the agent catch-all AFTER specific routes
-    add_adk_fastapi_endpoint(app, resume_building_agent, path="/")
+        return {
+            "tailored_sections": tailored,
+            "rendered_tex": rendered_tex,
+            "compiled_pdf_base64": pdf_base64,
+            "success": bool(tailored),
+        }
 
     uvicorn.run(
         app,

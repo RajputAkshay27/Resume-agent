@@ -1,153 +1,104 @@
 """
-Agent tools for the Resume Builder multi-agent system.
+tools.py — Agent tools for the Resume Builder v2 multi-agent system.
 
-These tools bridge the Python agent with the Next.js frontend APIs and
-the structured generation / LaTeX compilation pipeline.
+Changes from v1:
+  - Removed: _load_local_profile/jd/prefs/template (replaced by storage_client)
+  - Removed: _internal_get / _internal_post (dead Next.js frontend API calls)
+  - Removed: all urllib.request usage
+  - Added:   storage_client integration (SQLite-first)
+  - Updated: get_all_context() — token-optimized, only sends TailoredSections-relevant data,
+             prunes context based on SectionPreferences, uses compact format
+  - Renamed: submit_tailored_resume → submit_tailored_sections (validates TailoredSections only)
+  - Updated: render_latex() — merges StaticProfile + TailoredSections via FullResume compositor
+  - Added:   guardrails integration (fabrication check, sanitization)
 """
 
-import os
 import json
 import logging
-import urllib.request
+import os
 
 from google.adk.tools.tool_context import ToolContext
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.llm_response import LlmResponse
 from pydantic import ValidationError
-from schemas import SectionPreferences, TailoredResume
-from latex_bridge import validate_template as _validate_template, render_resume, compile_pdf
+
+from schemas import (
+    FullResume,
+    SectionPreferences,
+    StaticProfile,
+    TailoredSections,
+)
+from latex_bridge import render_resume, compile_pdf
+from storage_client import storage
+from guardrails import (
+    detect_prompt_injection,
+    sanitize_text_input,
+    verify_no_fabrication,
+)
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Context compression helpers (token optimization)
 # ---------------------------------------------------------------------------
 
-def _load_local_profile() -> dict:
-    path = os.getenv("MASTER_PROFILE_PATH", "data/master_profile.json")
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        logger.error("Error loading master profile: %s", e)
-        return {}
+def _compact_experience(experiences: list[dict]) -> str:
+    """
+    Serialize experience list in compact format for LLM context.
+
+    Uses single-line key-value format instead of json.dumps(indent=2)
+    to reduce token count while preserving all information.
+    """
+    lines: list[str] = []
+    for i, exp in enumerate(experiences, 1):
+        lines.append(
+            f"[Exp {i}] {exp.get('title', '')} @ {exp.get('company', '')} "
+            f"({exp.get('start_date', '')}–{exp.get('end_date', '')})"
+        )
+        for bullet in exp.get("bullets", []):
+            lines.append(f"  - {bullet}")
+    return "\n".join(lines)
 
 
-def _load_local_jd() -> str:
-    path = os.getenv("JOB_DESCRIPTION_PATH", "data/job_description.txt")
-    if not os.path.exists(path):
-        return ""
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return f.read()
-    except Exception as e:
-        logger.error("Error loading job description: %s", e)
-        return ""
+def _compact_projects(projects: list[dict]) -> str:
+    """Serialize projects list in compact format for LLM context."""
+    lines: list[str] = []
+    for i, proj in enumerate(projects, 1):
+        tech = proj.get("technologies", "")
+        desc = proj.get("description", "")
+        lines.append(
+            f"[Proj {i}] {proj.get('name', '')} | Tech: {tech}"
+        )
+        if desc:
+            lines.append(f"  Description: {desc}")
+        for bullet in proj.get("bullets", []):
+            lines.append(f"  - {bullet}")
+    return "\n".join(lines)
 
 
-def _load_local_prefs() -> dict:
-    path = os.getenv("PREFERENCES_PATH", "data/preferences.json")
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        logger.error("Error loading preferences: %s", e)
-        return {}
-
-
-def _load_local_template() -> str:
-    path = os.getenv("RESUME_TEMPLATE_PATH", "data/resume_template.tex")
-    if not os.path.exists(path):
-        # Fallback to root template
-        if os.path.exists("resume_template.tex"):
-            with open("resume_template.tex", "r", encoding="utf-8") as f:
-                return f.read()
-        return ""
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return f.read()
-    except Exception as e:
-        logger.error("Error loading resume template: %s", e)
-        return ""
-
-
-def _get_thread_id(tool_context: ToolContext) -> str:
-    """Get the CopilotKit thread ID from the agent session state."""
-    tid = tool_context.state.get("_ag_ui_thread_id")
-    if not tid:
-        tid = tool_context._invocation_context.session.id
-    return tid
-
-
-def _internal_get(path: str) -> dict:
-    """Authenticated GET to the Next.js internal API."""
-    secret = os.getenv("NEXTAUTH_SECRET", "super_secret_temporary_key_replace_me_in_production")
-    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3001").rstrip("/")
-    url = f"{frontend_url}{path}"
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {secret}"})
-    with urllib.request.urlopen(req) as resp:
-        return json.loads(resp.read().decode())
-
-
-def _internal_post(path: str, data: dict) -> dict:
-    """Authenticated POST to the Next.js internal API."""
-    secret = os.getenv("NEXTAUTH_SECRET", "super_secret_temporary_key_replace_me_in_production")
-    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3001").rstrip("/")
-    url = f"{frontend_url}{path}"
-    body = json.dumps(data).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=body,
-        headers={"Authorization": f"Bearer {secret}", "Content-Type": "application/json"},
-        method="POST",
+def _compact_skills(skills: dict) -> str:
+    """Serialize skills dict in compact single-line format."""
+    return " | ".join(
+        f"{cat}: {', '.join(items)}"
+        for cat, items in skills.items()
+        if items
     )
-    with urllib.request.urlopen(req) as resp:
-        return json.loads(resp.read().decode())
 
 
-def _ensure_dict(val) -> dict:
-    """Ensure that the value is a dictionary, parsing it if it is a string.
-    Handles double-encoded JSON, and list-wrapped JSON which often occur
-    in Prisma/SQLite or when the LLM returns an array."""
-    if val is None:
-        return {}
-    if isinstance(val, dict):
-        return val
-    if isinstance(val, list):
-        if len(val) > 0:
-            return _ensure_dict(val[0])
-        return {}
-    if isinstance(val, str):
-        # Try parsing up to 3 layers of JSON nesting
-        current = val
-        for _ in range(3):
-            try:
-                parsed = json.loads(current.strip())
-                if isinstance(parsed, dict):
-                    return parsed
-                if isinstance(parsed, list):
-                    if len(parsed) > 0:
-                        current = parsed[0] # unwrap and continue
-                    else:
-                        return {}
-                elif isinstance(parsed, str):
-                    current = parsed  # keep unwrapping
-                else:
-                    break
-            except (json.JSONDecodeError, TypeError):
-                break
-    return {}
+def _compact_achievements(achievements: list[str]) -> str:
+    """Serialize achievements list in compact format."""
+    return " | ".join(achievements) if achievements else ""
 
 
 def _coerce_prefs(raw: dict) -> dict:
-    """Coerce section preference values to their correct Python types.
-    Handles cases where 'true'/'false' are stored as strings and
-    count values come as strings like '2' instead of int 2."""
-    coerced = {}
+    """
+    Coerce section preference values to their correct Python types.
+
+    Handles cases where boolean values are stored as strings ('true'/'false')
+    and count values come as strings ('2') instead of int 2.
+    """
+    coerced: dict = {}
     for key, value in raw.items():
         if key in ("include_summary", "include_skills"):
             if isinstance(value, str):
@@ -157,7 +108,7 @@ def _coerce_prefs(raw: dict) -> dict:
             else:
                 coerced[key] = bool(value)
         elif key.endswith("_count"):
-            if value is None or value == "null" or value == "":
+            if value is None or value in ("null", ""):
                 coerced[key] = None
             elif isinstance(value, str):
                 try:
@@ -171,355 +122,445 @@ def _coerce_prefs(raw: dict) -> dict:
     return coerced
 
 
-
-
 # ---------------------------------------------------------------------------
-# Tool: Read State
+# Tool: read_state
 # ---------------------------------------------------------------------------
 
-def read_state(tool_context: ToolContext):
-    """Read your internal session state to view the stored master profile, JD, section preferences, and tailored resume data."""
+def read_state(tool_context: ToolContext) -> str:
+    """
+    Read the current session state.
+
+    Returns a compact summary of what is available in state:
+    master profile, job description, preferences, and tailored sections.
+    """
     try:
         scratchpad = tool_context.state.get("scratchpad") or {}
-        tailored_resume = tool_context.state.get("tailored_resume")
+        tailored = (
+            tool_context.state.get("tailored_sections")
+            or tool_context.state.get("tailored_resume")
+        )
 
-        result = {}
+        result: dict = {}
 
-        # Surface scratchpad contents at the top level for readability
         if scratchpad.get("master_profile"):
             profile = scratchpad["master_profile"]
-            result["master_profile_summary"] = {
+            result["profile_summary"] = {
                 "experience_count": len(profile.get("experience", [])),
                 "project_count": len(profile.get("projects", [])),
-                "achievement_count": len(profile.get("achievements", [])),
-                "skills": list(profile.get("skills", {}).keys()),
+                "skills_categories": list(profile.get("skills", {}).keys()),
             }
+
         if scratchpad.get("job_description"):
             jd = scratchpad["job_description"]
-            result["job_description_preview"] = jd[:300] + "..." if len(jd) > 300 else jd
-        if scratchpad.get("section_prefs"):
-            result["section_prefs"] = scratchpad["section_prefs"]
+            result["jd_preview"] = jd[:200] + ("..." if len(jd) > 200 else "")
 
-        # Expose tailored_resume existence and summary (lives at top-level state, set by ADK output_key)
-        if tailored_resume:
-            if isinstance(tailored_resume, dict):
-                data = tailored_resume
-            elif hasattr(tailored_resume, "model_dump"):
-                data = tailored_resume.model_dump()
-            else:
-                data = {}
-            result["tailored_resume"] = {
+        if scratchpad.get("section_prefs"):
+            result["preferences"] = scratchpad["section_prefs"]
+
+        if scratchpad.get("jd_analysis"):
+            analysis = scratchpad["jd_analysis"]
+            result["jd_analysis"] = {
+                "role": analysis.get("role_title"),
+                "seniority": analysis.get("seniority_level"),
+                "skills_found": sum(
+                    len(v) for v in analysis.get("required_skills", {}).values()
+                ),
+            }
+
+        if tailored:
+            data = tailored if isinstance(tailored, dict) else tailored.model_dump()
+            result["tailored_sections"] = {
                 "status": "present",
                 "experience_count": len(data.get("experience", [])),
                 "project_count": len(data.get("projects", [])),
-                "achievement_count": len(data.get("achievements", [])),
-                "has_summary": bool(data.get("tailored_summary")),
+                "has_summary": bool(data.get("summary")),
                 "has_skills": bool(data.get("skills")),
+                "achievement_count": len(data.get("achievements", [])),
             }
         else:
-            result["tailored_resume"] = "NOT PRESENT — tailoring must be run before compilation"
+            result["tailored_sections"] = "NOT PRESENT — run tailoring first."
 
         if not result:
             return "Session state is empty. No data has been loaded yet."
 
         return json.dumps(result, indent=2)
-    except Exception as e:
-        logger.error("[read_state] Unhandled error: %s", e, exc_info=True)
-        return f"Error reading session state: {str(e)}. Please retry."
-
-
-
-# ---------------------------------------------------------------------------
-# Tool: Render and Compile PDF
-# ---------------------------------------------------------------------------
-
-def render_latex(tool_context: ToolContext):
-    """Render the tailored resume data into a Jinja2 LaTeX template and store/compile it."""
-    try:
-        tailored = tool_context.state.get("tailored_resume")
-        if not tailored:
-            return "No tailored resume data in state. Please make sure the tailoring_agent has successfully generated it."
-
-        thread_id = _get_thread_id(tool_context)
-
-        # Try to use frontend context if FRONTEND_URL is set
-        frontend_url = os.getenv("FRONTEND_URL")
-        template_key = None
-        if frontend_url:
-            try:
-                data = _internal_get(f"/api/internal/context?threadId={thread_id}")
-                template_key = data.get("templateKey")
-            except Exception as e:
-                logger.warning("Failed to fetch template key from frontend, falling back to local template: %s", e)
-
-        # 2. Validate and resolve the tailored resume
-        try:
-            # This handles 'unwrap_list' and strict type checking
-            validated_resume = TailoredResume(**tailored) if isinstance(tailored, dict) else tailored
-            tailored_dict = validated_resume.model_dump(exclude_none=True)
-        except ValidationError as e:
-            return f"Tailored resume validation failed. The format is incorrect: {e}"
-        except Exception as e:
-            return f"Could not parse tailored resume from state: {e}"
-
-        if not template_key:
-            # Standalone Local Mode: Render and compile directly to local output directory
-            template_content = _load_local_template()
-            if not template_content:
-                return "No LaTeX template found. Please place a template at data/resume_template.tex."
-
-            try:
-                rendered_tex = render_resume(template_content, validated_resume)
-            except Exception as e:
-                return f"LaTeX render failed: {e}"
-
-            # Ensure output directory exists
-            output_dir = os.getenv("OUTPUT_DIR", "output")
-            os.makedirs(output_dir, exist_ok=True)
-
-            tex_path = os.path.join(output_dir, "resume.tex")
-            with open(tex_path, "w", encoding="utf-8", newline="") as f:
-                f.write(rendered_tex)
-
-            pdf_path = None
-            try:
-                # Compile PDF locally
-                pdf_path = compile_pdf(rendered_tex, output_dir)
-            except Exception as e:
-                logger.warning("Failed to compile PDF locally (is pdflatex installed?): %s", e)
-
-            msg = f"LaTeX rendered successfully and saved to {tex_path}!\n"
-            if pdf_path:
-                msg += f"PDF compiled successfully and saved to {pdf_path}!\n"
-            else:
-                msg += "Note: PDF compilation skipped or failed. Ensure 'pdflatex' is installed and in your PATH."
-            return msg
-
-        # 3. Call the LaTeX Service /render endpoint (Original microservice path)
-        latex_service_url = os.getenv("LATEX_SERVICE_URL", "http://localhost:8002")
-        latex_service_url = latex_service_url.replace('"', '').replace("'", '').strip()
-        if not latex_service_url.startswith("http"):
-            latex_service_url = f"http://{latex_service_url}"
-
-        api_key = os.getenv("INTERNAL_API_KEY", "default_secret_key_change_me")
-        payload = {
-            "tailored_data": tailored_dict,
-            "template_key": template_key,
-            "thread_id": thread_id,
-        }
-        body = json.dumps(payload).encode("utf-8")
-        render_req = urllib.request.Request(
-            f"{latex_service_url}/render",
-            data=body,
-            headers={"X-API-Key": api_key, "Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(render_req, timeout=120) as resp:
-                result = json.loads(resp.read().decode())
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode()
-            return f"LaTeX render failed (HTTP {e.code}): {error_body}"
-        except Exception as e:
-            return f"Could not reach LaTeX Service: {e}"
-
-        tex_key = result.get("tex_key")
-        latex_hash = result.get("latex_hash")
-
-        # 4. Persist tailored profile + tex metadata in the frontend DB
-        _internal_post("/api/internal/context", {
-            "threadId": thread_id,
-            "tailoredProfile": json.dumps(tailored_dict),
-            "texKey": tex_key,
-            "latexHash": latex_hash,
-        })
-
-        return (
-            f"LaTeX rendered and stored successfully!\n"
-            f"Hash: {latex_hash}\n"
-            f"The user can now download the PDF or LaTeX source from the header buttons."
-        )
 
     except Exception as e:
-        logger.error("[render_latex] Unhandled error: %s", e, exc_info=True)
-        return f"Error in render_latex: {str(e)}. Please retry."
+        logger.error("[read_state] Error: %s", e, exc_info=True)
+        return f"Error reading session state: {e}. Please retry."
+
 
 # ---------------------------------------------------------------------------
-# Tool for Tailoring Agent: Single combined context fetch
+# Tool: get_all_context (token-optimized)
 # ---------------------------------------------------------------------------
 
 def get_all_context(tool_context: ToolContext) -> str:
-    """Fetch ALL context needed for resume tailoring in a single call: the master profile, job description, and user preferences. Call this ONCE to get everything."""
+    """
+    Fetch ALL context needed for resume tailoring in a single call.
+
+    TOKEN OPTIMIZATION:
+      1. Only sends TailoredSections-relevant data (experience, projects, skills,
+         achievements) — NOT name, email, phone, education, or certifications.
+         These static fields are preserved in session state for the renderer.
+      2. Sections excluded by SectionPreferences are omitted entirely from the
+         LLM context (e.g. if project_count=0, projects are not sent).
+      3. Uses compact single-line format instead of indented JSON.
+      4. JD analysis (if cached) replaces raw JD prose for further token savings.
+
+    Call this ONCE to get everything the tailoring agent needs.
+    """
     try:
-        thread_id = _get_thread_id(tool_context)
-        profile_dict = {}
-        jd = ""
-        prefs_dict = {}
+        store = storage()
 
-        frontend_url = os.getenv("FRONTEND_URL")
-        if frontend_url:
-            try:
-                data = _internal_get(f"/api/internal/context?threadId={thread_id}")
-                profile_dict = _ensure_dict(data.get("masterProfile", {}))
-                jd = data.get("jobDescription", "")
-                raw_prefs = _ensure_dict(data.get("sectionPrefs", {}))
-                prefs_dict = _coerce_prefs(raw_prefs)
-            except Exception as e:
-                logger.warning("Error fetching context from frontend, falling back to local files: %s", e)
-
-        # Fallback to local files if not loaded from frontend
+        # ── Load master profile ───────────────────────────────────────────
+        profile_dict = store.load_profile() or {}
         if not profile_dict:
-            profile_dict = _load_local_profile()
-        if not jd:
-            jd = _load_local_jd()
-        if not prefs_dict:
-            prefs_dict = _load_local_prefs()
+            return (
+                "No Master Profile found in the database. "
+                "Please add your profile using: python cli.py profile update --file path/to/profile.json"
+            )
 
-        if not profile_dict:
-            return "No Master Profile found. Please make sure data/master_profile.json exists."
-        if not jd:
-            return "No Job Description found. Please make sure data/job_description.txt exists."
+        # ── Load job description ──────────────────────────────────────────
+        jd_raw = store.load_job_description() or ""
+        if not jd_raw:
+            return (
+                "No Job Description found. "
+                "Please set one using: python cli.py jd set --file path/to/jd.txt"
+            )
 
-        # Ensure all standard default fields exist in section preferences
-        prefs_obj = SectionPreferences(**prefs_dict)
-        prefs_dict = prefs_obj.model_dump()
+        # Sanitize JD for injection patterns
+        if detect_prompt_injection(jd_raw, "job_description"):
+            logger.warning("[get_all_context] Potential prompt injection detected in JD — proceeding with caution.")
 
-        pref_lines = []
-        if prefs_dict.get("experience_count") is not None:
-            pref_lines.append(f"- Experience: Select exactly {prefs_dict['experience_count']} items.")
-        if prefs_dict.get("project_count") is not None:
-            pref_lines.append(f"- Projects: Select exactly {prefs_dict['project_count']} items.")
-        if prefs_dict.get("achievement_count") is not None:
-            pref_lines.append(f"- Achievements: Select exactly {prefs_dict['achievement_count']} items.")
-        if not prefs_dict.get("include_summary", True):
-            pref_lines.append("- Summary: Do NOT include a summary.")
-        if not prefs_dict.get("include_skills", True):
-            pref_lines.append("- Skills: Do NOT include skills.")
-        if prefs_dict.get("custom_instructions"):
-            pref_lines.append(f"- Special User Custom Instructions: {prefs_dict['custom_instructions']}")
-        prefs_text = "\n".join(pref_lines) if pref_lines else "No strict quantity limits specified."
+        try:
+            jd = sanitize_text_input(jd_raw, max_length=15_000, field_name="job_description")
+        except ValueError as e:
+            return f"Job description rejected: {e}"
 
-        # --- Persist to scratchpad for enforce_preferences callback ---
+        # ── Load preferences ──────────────────────────────────────────────
+        raw_prefs = store.load_preferences() or {}
+        prefs_coerced = _coerce_prefs(raw_prefs)
+        prefs = SectionPreferences(**prefs_coerced)
+
+        # ── Separate static from dynamic profile sections ─────────────────
+        # Static fields (NOT sent to LLM — stored in scratchpad for renderer)
+        static_data = {
+            "name": profile_dict.get("name", ""),
+            "email": profile_dict.get("email", ""),
+            "phone": profile_dict.get("phone", ""),
+            "linkedin": profile_dict.get("linkedin", ""),
+            "github": profile_dict.get("github", ""),
+            "website": profile_dict.get("website", ""),
+            "education": profile_dict.get("education", []),
+            "certifications": profile_dict.get("certifications", []),
+        }
+
+        # Dynamic fields (sent to LLM — pruned by preferences)
+        all_experience: list[dict] = profile_dict.get("experience", [])
+        all_projects: list[dict] = profile_dict.get("projects", [])
+        all_skills: dict = profile_dict.get("skills", {})
+        all_achievements: list[str] = profile_dict.get("achievements", [])
+
+        # ── Persist to scratchpad (for enforce_preferences + renderer) ────
         scratchpad = tool_context.state.get("scratchpad") or {}
         scratchpad["master_profile"] = profile_dict
+        scratchpad["static_profile"] = static_data
         scratchpad["job_description"] = jd
-        scratchpad["section_prefs"] = prefs_dict
+        scratchpad["section_prefs"] = prefs.model_dump()
         tool_context.state["scratchpad"] = scratchpad
 
-        # --- Build combined response ---
-        exp_count = len(profile_dict.get("experience", []))
-        proj_count = len(profile_dict.get("projects", []))
+        # ── Build preference instructions ─────────────────────────────────
+        pref_lines: list[str] = []
+        if prefs.experience_count is not None:
+            pref_lines.append(f"Experience: select exactly {prefs.experience_count} items.")
+        if prefs.project_count is not None:
+            pref_lines.append(f"Projects: select exactly {prefs.project_count} items.")
+        if prefs.achievement_count is not None:
+            pref_lines.append(f"Achievements: select exactly {prefs.achievement_count} items.")
+        if not prefs.include_summary:
+            pref_lines.append("Summary: Do NOT include a summary (set to empty string).")
+        if not prefs.include_skills:
+            pref_lines.append("Skills: Do NOT include skills (return empty dict).")
+        if prefs.custom_instructions:
+            pref_lines.append(f"Custom: {prefs.custom_instructions}")
+        prefs_text = "\n".join(f"- {p}" for p in pref_lines) if pref_lines else "No strict limits — select the most relevant items."
 
-        return f"""## MASTER PROFILE
-{json.dumps(profile_dict, indent=2)}
+        # ── Build compact profile context (token-optimized) ───────────────
+        context_parts: list[str] = ["## CANDIDATE PROFILE (Dynamic Sections Only)\n"]
 
-## JOB DESCRIPTION
-{jd}
+        # Experience — always included unless explicitly excluded (count=0)
+        if prefs.experience_count != 0 and all_experience:
+            context_parts.append("### Experience")
+            context_parts.append(_compact_experience(all_experience))
+            context_parts.append("")
 
-## USER PREFERENCES ({exp_count} experiences, {proj_count} projects available in profile)
-{prefs_text}"""
-    except Exception as e:
-        logger.error("[get_all_context] Unhandled error: %s", e, exc_info=True)
-        return f"Error fetching context data: {str(e)}. Please retry."
+        # Projects — omit entirely if project_count=0 (saves tokens)
+        if prefs.project_count != 0 and all_projects:
+            context_parts.append("### Projects")
+            context_parts.append(_compact_projects(all_projects))
+            context_parts.append("")
 
+        # Skills — omit if include_skills=False
+        if prefs.include_skills and all_skills:
+            context_parts.append("### Skills")
+            context_parts.append(_compact_skills(all_skills))
+            context_parts.append("")
 
-def submit_tailored_resume(payload: dict, tool_context: ToolContext) -> str:
-    """
-    Submit the finalized tailored resume data for validation and storage. 
-    Call this tool ONLY AFTER you have fetched all context via get_all_context 
-    and analyzed the job description against the master profile.
-    
-    Args:
-        payload (dict): A dictionary matching the TailoredResume schema. 
-                        Must include summary, experience, skills and other things based on user prefrence.
-    """
-    try:
+        # Achievements — omit if achievement_count=0
+        if prefs.achievement_count != 0 and all_achievements:
+            context_parts.append("### Achievements")
+            context_parts.append(_compact_achievements(all_achievements))
+            context_parts.append("")
 
-        # Validate the payload against the schema
-        # We don't save to state here; the after_model_callback handles that
-        # to ensure consistency with the tool's return value.
-        TailoredResume(**payload)
-        return "SUCCESS: Resume formatted correctly and accepted."
-    except ValidationError as e:
-        # Extract the error details to send back to the LLM
-        errors = []
-        for error in e.errors():
-            loc = " -> ".join(str(l) for l in error['loc'])
-            msg = error['msg']
-            errors.append(f"- {loc}: {msg}")
-        
-        error_str = "\n".join(errors)
-        logger.warning("TailoredResume validation failed: %s", error_str)
-        return (
-            f"FAILURE: Resume validation failed with the following errors:\n{error_str}\n\n"
-            "Please fix these fields/missing components and call `submit_tailored_resume` again with the FULL corrected payload."
+        # ── JD context (prefer cached analysis for token efficiency) ──────
+        jd_analysis = scratchpad.get("jd_analysis")
+        if jd_analysis:
+            context_parts.append("## JOB REQUIREMENTS (Pre-analyzed)")
+            context_parts.append(f"Role: {jd_analysis.get('role_title', '')}")
+            context_parts.append(f"Seniority: {jd_analysis.get('seniority_level', '')}")
+            required_skills = jd_analysis.get("required_skills", {})
+            if required_skills:
+                context_parts.append("Required Skills:")
+                for cat, skills in required_skills.items():
+                    context_parts.append(f"  {cat}: {', '.join(skills)}")
+            responsibilities = jd_analysis.get("key_responsibilities", [])
+            if responsibilities:
+                context_parts.append("Key Responsibilities:")
+                for resp in responsibilities[:5]:
+                    context_parts.append(f"  - {resp}")
+        else:
+            # Fall back to full JD text (truncated for token safety)
+            context_parts.append("## JOB DESCRIPTION")
+            context_parts.append(jd[:4000] + ("\n[...truncated...]" if len(jd) > 4000 else ""))
+
+        context_parts.append("")
+        context_parts.append("## USER PREFERENCES")
+        context_parts.append(prefs_text)
+
+        logger.info(
+            "[get_all_context] Context built — %d experiences, %d projects, %d skill categories. "
+            "JD analysis cached: %s.",
+            len(all_experience), len(all_projects), len(all_skills),
+            bool(jd_analysis),
         )
+
+        return "\n".join(context_parts)
+
     except Exception as e:
-        logger.error("Unexpected error in submit_tailored_resume: %s", e)
-        return f"FAILURE: An unexpected error occurred during validation: {str(e)}"
+        logger.error("[get_all_context] Error: %s", e, exc_info=True)
+        return f"Error fetching context: {e}. Please retry."
 
 
 # ---------------------------------------------------------------------------
-# Agent Callbacks / Logic
+# Tool: submit_tailored_sections (renamed from submit_tailored_resume)
+# ---------------------------------------------------------------------------
+
+def submit_tailored_sections(payload: dict, tool_context: ToolContext) -> str:
+    """
+    Submit the finalized tailored resume sections for validation and storage.
+
+    Validates ONLY the TailoredSections schema (summary, experience, projects,
+    skills, achievements) — NOT static identity fields.
+
+    Call this ONLY AFTER get_all_context and after drafting all content.
+
+    Args:
+        payload: A dict matching the TailoredSections schema.
+    """
+    try:
+        TailoredSections(**payload)
+        return "SUCCESS: Tailored sections validated and accepted."
+
+    except ValidationError as e:
+        errors = [
+            f"- {' -> '.join(str(loc) for loc in err['loc'])}: {err['msg']}"
+            for err in e.errors()
+        ]
+        error_str = "\n".join(errors)
+        logger.warning("[submit_tailored_sections] Validation failed:\n%s", error_str)
+        return (
+            f"FAILURE: Validation failed:\n{error_str}\n\n"
+            "Fix these fields and call submit_tailored_sections again with the FULL corrected payload."
+        )
+
+    except Exception as e:
+        logger.error("[submit_tailored_sections] Unexpected error: %s", e)
+        return f"FAILURE: Unexpected error during validation: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Tool: render_latex
+# ---------------------------------------------------------------------------
+
+def render_latex(tool_context: ToolContext) -> str:
+    """
+    Render the tailored resume data into a Jinja2 LaTeX template and compile to PDF.
+
+    Merges StaticProfile (from scratchpad) + TailoredSections (from session state)
+    into a FullResume compositor before rendering — the LLM never touches
+    the static identity fields.
+    """
+    try:
+        tailored_data = (
+            tool_context.state.get("tailored_sections")
+            or tool_context.state.get("tailored_resume")
+        )
+        if not tailored_data:
+            return (
+                "No tailored sections in state. "
+                "Please run the tailoring agent first."
+            )
+
+        # ── Validate tailored sections ────────────────────────────────────
+        try:
+            tailored = TailoredSections(**tailored_data) if isinstance(tailored_data, dict) else tailored_data
+        except ValidationError as e:
+            return f"Tailored sections validation failed: {e}"
+
+        # ── Load static profile from scratchpad ───────────────────────────
+        scratchpad = tool_context.state.get("scratchpad") or {}
+        static_data = scratchpad.get("static_profile") or {}
+
+        if not static_data:
+            # Fallback: load from storage
+            profile_dict = storage().load_profile() or {}
+            static_data = {
+                "name": profile_dict.get("name", ""),
+                "email": profile_dict.get("email", ""),
+                "phone": profile_dict.get("phone", ""),
+                "linkedin": profile_dict.get("linkedin", ""),
+                "github": profile_dict.get("github", ""),
+                "website": profile_dict.get("website", ""),
+                "education": profile_dict.get("education", []),
+                "certifications": profile_dict.get("certifications", []),
+            }
+
+        try:
+            static = StaticProfile(**static_data)
+        except ValidationError as e:
+            return f"Static profile validation failed: {e}"
+
+        # ── Fabrication check ─────────────────────────────────────────────
+        master_profile = scratchpad.get("master_profile") or {}
+        warnings = verify_no_fabrication(tailored_data if isinstance(tailored_data, dict) else tailored.model_dump(), master_profile)
+        if warnings:
+            logger.warning("[render_latex] Fabrication warnings (rendering anyway): %s", warnings)
+
+        # ── Compose FullResume ────────────────────────────────────────────
+        full_resume = FullResume(static=static, tailored=tailored)
+
+        # ── Load template from storage ────────────────────────────────────
+        template_content = storage().load_template()
+        if not template_content:
+            # Fallback to file-based template
+            for path in ["data/resume_template.tex", "resume_template.tex"]:
+                if os.path.exists(path):
+                    with open(path, "r", encoding="utf-8") as f:
+                        template_content = f.read()
+                    break
+
+        if not template_content:
+            return (
+                "No LaTeX template found. Add one using: "
+                "python cli.py template add --file path/to/template.tex"
+            )
+
+        # ── Render ────────────────────────────────────────────────────────
+        try:
+            rendered_tex = render_resume(template_content, full_resume)
+        except Exception as e:
+            return f"LaTeX render failed: {e}"
+
+        # ── Compile PDF ───────────────────────────────────────────────────
+        output_dir = os.getenv("OUTPUT_DIR", "output")
+        os.makedirs(output_dir, exist_ok=True)
+
+        import os as _os
+        tex_path = _os.path.join(output_dir, "resume.tex")
+        with open(tex_path, "w", encoding="utf-8", newline="") as f:
+            f.write(rendered_tex)
+
+        pdf_path: str | None = None
+        try:
+            pdf_path = compile_pdf(rendered_tex, output_dir)
+        except Exception as e:
+            logger.warning("[render_latex] PDF compilation failed (pdflatex installed?): %s", e)
+
+        # ── Save tailored output to history ───────────────────────────────
+        try:
+            storage().save_tailored_output(
+                tailored.model_dump() if hasattr(tailored, "model_dump") else tailored_data
+            )
+        except Exception as e:
+            logger.warning("[render_latex] Failed to save tailored output to history: %s", e)
+
+        msg = f"LaTeX rendered successfully → {tex_path}\n"
+        if pdf_path:
+            msg += f"PDF compiled successfully → {pdf_path}"
+        else:
+            msg += "PDF compilation skipped (pdflatex not found or failed). The .tex file is ready."
+
+        return msg
+
+    except Exception as e:
+        logger.error("[render_latex] Unhandled error: %s", e, exc_info=True)
+        return f"Error in render_latex: {e}. Please retry."
+
+
+# ---------------------------------------------------------------------------
+# Agent Callbacks
 # ---------------------------------------------------------------------------
 
 def capture_tailored_output(
-        callback_context: CallbackContext,
-        llm_response: LlmResponse,
+    callback_context: CallbackContext,
+    llm_response: LlmResponse,
 ) -> None:
-    """after_model_callback: Inspect tool calls for submit_tailored_resume
-    and manually persist the validated payload to state.
+    """
+    after_model_callback: Inspect tool calls for submit_tailored_sections
+    and persist the validated payload to session state.
     """
     if not llm_response or not llm_response.content:
         return None
 
     parts = llm_response.content.parts or []
     for part in parts:
-        # Each part might contain a function_call object
         call = getattr(part, "function_call", None)
-        if call and call.name == "submit_tailored_resume":
-            # Extract payload from the tool call arguments
+        if call and call.name == "submit_tailored_sections":
             payload = call.args.get("payload") if call.args else None
             if not payload:
                 continue
-            
             try:
-                resume = TailoredResume(**payload)
-                data = resume.model_dump(exclude_none=True)
-                
-
-                callback_context.state["tailored_resume"] = data
+                sections = TailoredSections(**payload)
+                callback_context.state["tailored_sections"] = sections.model_dump(exclude_none=True)
+                logger.info(
+                    "[capture_tailored_output] Tailored sections saved to state: "
+                    "%d exp, %d proj, has_summary=%s.",
+                    len(sections.experience),
+                    len(sections.projects),
+                    bool(sections.summary),
+                )
             except Exception as e:
-                # We don't log this as an error because the tool function itself 
-                # handles sending the error description back to the LLM for a retry.
-                logger.debug("capture_tailored_output: tool call validation failed (LLM will retry): %s", e)
-    
+                logger.debug(
+                    "[capture_tailored_output] Validation failed (LLM will retry): %s", e
+                )
     return None
 
+
 def enforce_preferences(callback_context: CallbackContext) -> None:
-    """after_agent_callback: Enforce section preferences by truncating
-    any extra items the LLM may have produced.
-
-    At this point, tailored_resume SHOULD be in state (written by
-    capture_tailored_output). If it's missing, there's nothing to enforce.
     """
-    tailored = callback_context.state.get("tailored_resume")
-    
-
+    after_agent_callback: Enforce section preferences by truncating any extra
+    items the LLM produced beyond the user's limits.
+    """
+    tailored = callback_context.state.get("tailored_sections") or callback_context.state.get("tailored_resume")
     if not tailored:
         return
 
     raw_prefs = callback_context.state.get("scratchpad", {}).get("section_prefs", {})
     prefs = SectionPreferences(**raw_prefs) if raw_prefs else SectionPreferences()
 
-    if hasattr(tailored, "model_dump"):
-        data = tailored.model_dump()
-    elif isinstance(tailored, dict):
-        data = dict(tailored)
-    else:
-        return
-
+    data = tailored if isinstance(tailored, dict) else tailored.model_dump()
     changed = False
+
     if prefs.experience_count is not None and len(data.get("experience", [])) > prefs.experience_count:
         data["experience"] = data["experience"][: prefs.experience_count]
         changed = True
@@ -530,17 +571,16 @@ def enforce_preferences(callback_context: CallbackContext) -> None:
         data["achievements"] = data["achievements"][: prefs.achievement_count]
         changed = True
     if not prefs.include_summary and data.get("summary"):
-        data["summary"] = ""  # Set to empty string instead of None to satisfy compulsory schema
+        data["summary"] = ""
         changed = True
     if not prefs.include_skills and data.get("skills"):
         data["skills"] = {}
         changed = True
 
-    
     if changed:
         try:
-            validated = TailoredResume(**data)
-            callback_context.state["tailored_resume"] = validated.model_dump(exclude_none=True)
+            validated = TailoredSections(**data)
+            callback_context.state["tailored_sections"] = validated.model_dump(exclude_none=True)
+            logger.info("[enforce_preferences] Preferences enforced and state updated.")
         except Exception as e:
-            logger.error("enforce_preferences: VALIDATION FAILED after enforcement: %s", e)
-    pass
+            logger.error("[enforce_preferences] Validation failed after enforcement: %s", e)

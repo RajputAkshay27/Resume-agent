@@ -111,6 +111,20 @@ class SectionPreferences(BaseModel):
         default=True,
         description="Whether to include the skills section.",
     )
+    bullets_per_experience: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Number of bullets to include per experience entry. None=AI decides.",
+    )
+    bullets_per_project: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Number of bullets to include per project entry. None=AI decides.",
+    )
+    output_file_name: str = Field(
+        default="resume",
+        description="Name of the output LaTeX/PDF file (without extension).",
+    )
     custom_instructions: Optional[str] = Field(
         default=None,
         max_length=1000,

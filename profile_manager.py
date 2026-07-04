@@ -86,69 +86,130 @@ class GUIBridge:
     def load_template(self, version: Optional[int] = None) -> Optional[str]:
         return self._store.load_template(version)
 
+    # ── Preferences ──────────────────────────────────────────────────────────
+
+    def load_prefs(self) -> dict:
+        return self._store.load_preferences() or {}
+
+    def save_prefs(self, prefs: dict) -> None:
+        self._store.save_preferences(prefs)
+
     # ── Agent Pipeline ────────────────────────────────────────────────────────
 
-    def run_pipeline_async(self, instruction: str, on_done, on_error) -> None:
+    def run_pipeline_async(self, instruction: str, on_done, on_error, session_id: Optional[str] = None) -> None:
         """
-        Run the agent pipeline in a background thread.
+        Run the agent pipeline by calling the native ADK API server in a background thread.
 
         Args:
             instruction: The natural language instruction to send to the agent.
             on_done:     Callback(result: dict) called on success.
             on_error:    Callback(error: str) called on failure.
+            session_id:  Optional persistent session ID to maintain chat context.
         """
+        import uuid
+        import httpx
+
+        active_session_id = session_id or str(uuid.uuid4())
+        user_id = "gui_user"
+
         def _run():
             try:
-                import asyncio
-                import uuid
-                from agent import create_agent
-                from google.adk import Runner
-                from google.adk.sessions.in_memory_session_service import InMemorySessionService
-                from google.genai import types
+                base_url = os.getenv("AGENT_SERVICE_URL", "http://localhost:8001")
+                url_run = f"{base_url}/run"
 
-                agent = create_agent()
-                session_service = InMemorySessionService()
-                runner = Runner(
-                    app_name="resume_builder_agent",
-                    agent=agent,
-                    session_service=session_service,
-                    auto_create_session=True,
-                )
-                session_id = str(uuid.uuid4())
-                user_id = f"gui_user_{session_id}"
-
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-
-                async def _async_run():
-                    async for _ in runner.run_async(
-                        user_id=user_id,
-                        session_id=session_id,
-                        new_message=types.Content(parts=[types.Part.from_text(text=instruction)]),
-                    ):
-                        pass
-                    return await session_service.get_session(
-                        app_name="resume_builder_agent",
-                        user_id=user_id,
-                        session_id=session_id,
+                with httpx.Client(timeout=300.0) as client:
+                    # 1. Run the agent step
+                    response = client.post(
+                        url_run,
+                        json={
+                            "appName": "agent",
+                            "userId": user_id,
+                            "sessionId": active_session_id,
+                            "newMessage": {
+                                "role": "user",
+                                "parts": [{"text": instruction}]
+                            }
+                        }
                     )
+                    response.raise_for_status()
+                    events = response.json()
 
-                session = loop.run_until_complete(_async_run())
-                loop.close()
+                    # Extract final response from events
+                    final_response = ""
+                    SKIP_PREFIXES = (
+                        "The user wants", "According to", "Following my", "Plan:",
+                        "Step 1:", "I will now", "I must:", "My workflow is:",
+                        "Looking at the context", "I will call", "I encountered",
+                        "Corrected Payload",
+                    )
+                    for event in reversed(events):
+                        author = event.get("author")
+                        if author not in ("resume_builder_agent", "tailoring_agent", "compilation_agent"):
+                            continue
+                        if event.get("partial") or event.get("thought"):
+                            continue
+                            
+                        content = event.get("content")
+                        if not content:
+                            continue
+                            
+                        parts = content.get("parts") or []
+                        text_bits = []
+                        for p in parts:
+                            if p.get("thought") or p.get("functionCall") or p.get("functionResponse"):
+                                continue
+                            text = p.get("text")
+                            if text and text.strip():
+                                if not any(text.strip().startswith(ph) for ph in SKIP_PREFIXES):
+                                    text_bits.append(text.strip())
+                                    
+                        if text_bits:
+                            final_response = "\n".join(text_bits)
+                            break
 
-                tailored = None
-                if session:
-                    tailored = session.state.get("tailored_sections") or session.state.get("tailored_resume")
+                    # 2. Fetch state to retrieve tailored sections
+                    url_state = f"{base_url}/apps/agent/users/{user_id}/sessions/{active_session_id}"
+                    state_resp = client.get(url_state)
+                    state_resp.raise_for_status()
+                    session_data = state_resp.json()
+                    state = session_data.get("state", {})
+                    tailored = state.get("tailored_sections") or state.get("tailored_resume")
 
+                # Read output files locally
                 output_dir = os.getenv("OUTPUT_DIR", "output")
-                tex_path = os.path.join(output_dir, "resume.tex") if os.path.exists(os.path.join(output_dir, "resume.tex")) else None
-                pdf_path = os.path.join(output_dir, "resume.pdf") if os.path.exists(os.path.join(output_dir, "resume.pdf")) else None
+                try:
+                    prefs = self.load_prefs()
+                    output_filename = prefs.get("output_file_name") or "resume"
+                    import re as _re
+                    output_filename = _re.sub(r"[^a-zA-Z0-9_\-]", "", output_filename)
+                    if not output_filename:
+                        output_filename = "resume"
+                except Exception:
+                    output_filename = "resume"
+
+                tex_path = os.path.join(output_dir, f"{output_filename}.tex") if os.path.exists(os.path.join(output_dir, f"{output_filename}.tex")) else None
+                pdf_path = os.path.join(output_dir, f"{output_filename}.pdf") if os.path.exists(os.path.join(output_dir, f"{output_filename}.pdf")) else None
 
                 on_done({
                     "tailored": tailored,
                     "tex_path": tex_path,
                     "pdf_path": pdf_path,
+                    "response": final_response,
+                    "session_id": active_session_id,
                 })
+            except httpx.ConnectError:
+                on_error(
+                    "Cannot connect to the ADK API server. "
+                    "Please make sure the ADK API server is running on port 8000. "
+                    "Run 'uv run adk api_server --session_service_uri=sqlite:///data/sessions.db ..' in the 'agent/' folder first."
+                )
+            except httpx.HTTPStatusError as e:
+                try:
+                    err_json = e.response.json()
+                    err_detail = err_json.get("error") or err_json.get("detail") or e.response.text
+                except Exception:
+                    err_detail = e.response.text
+                on_error(f"ADK API error ({e.response.status_code}): {err_detail}")
             except Exception as e:
                 logger.exception("Pipeline error: %s", e)
                 on_error(str(e))
@@ -239,16 +300,19 @@ class ProfileManagerApp(tk.Tk):
         self._tab_profile = ttk.Frame(self._notebook)
         self._tab_jd = ttk.Frame(self._notebook)
         self._tab_templates = ttk.Frame(self._notebook)
+        self._tab_preferences = ttk.Frame(self._notebook)
         self._tab_tailor = ttk.Frame(self._notebook)
 
         self._notebook.add(self._tab_profile, text="  📋 Profile  ")
         self._notebook.add(self._tab_jd, text="  💼 Job Description  ")
         self._notebook.add(self._tab_templates, text="  📄 Templates  ")
+        self._notebook.add(self._tab_preferences, text="  ⚙️ Preferences  ")
         self._notebook.add(self._tab_tailor, text="  🚀 Quick Tailor  ")
 
         self._build_profile_tab()
         self._build_jd_tab()
         self._build_templates_tab()
+        self._build_preferences_tab()
         self._build_tailor_tab()
 
     # ── Tab 1: Profile Editor ─────────────────────────────────────────────────
@@ -538,7 +602,191 @@ class ProfileManagerApp(tk.Tk):
             Path(path).write_text(content, encoding="utf-8")
             self._status(f"Template version {version} exported to {path}")
 
-    # ── Tab 4: Quick Tailor ───────────────────────────────────────────────────
+    # ── Tab 4: Preferences ────────────────────────────────────────────────────
+
+    def _build_preferences_tab(self):
+        frame = self._tab_preferences
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(1, weight=1)
+
+        # Header/Actions Frame
+        actions = ttk.Frame(frame, padding=8)
+        actions.grid(row=0, column=0, sticky="ew")
+        
+        ttk.Button(actions, text="💾  Save Preferences", command=self._save_preferences).pack(side="left", padx=4)
+
+        # Settings container frame
+        container = ttk.LabelFrame(frame, text="User Preferences")
+        container.grid(row=1, column=0, sticky="nsew", padx=8, pady=8)
+        container.columnconfigure(0, weight=1)
+        container.columnconfigure(1, weight=1)
+
+        # Variables for checking/values
+        self._pref_exp_ai = tk.BooleanVar(value=True)
+        self._pref_exp_val = tk.IntVar(value=3)
+        self._pref_proj_ai = tk.BooleanVar(value=True)
+        self._pref_proj_val = tk.IntVar(value=2)
+        self._pref_ach_ai = tk.BooleanVar(value=True)
+        self._pref_ach_val = tk.IntVar(value=1)
+        self._pref_cert_ai = tk.BooleanVar(value=True)
+        self._pref_cert_val = tk.IntVar(value=1)
+        
+        self._pref_bullets_exp_ai = tk.BooleanVar(value=True)
+        self._pref_bullets_exp_val = tk.IntVar(value=3)
+        self._pref_bullets_proj_ai = tk.BooleanVar(value=True)
+        self._pref_bullets_proj_val = tk.IntVar(value=3)
+
+        self._pref_output_filename = tk.StringVar(value="resume")
+
+        self._pref_include_summary = tk.BooleanVar(value=True)
+        self._pref_include_skills = tk.BooleanVar(value=True)
+
+        # Row 0: Experience Count
+        ttk.Label(container, text="Target Experience Entries:").grid(row=0, column=0, sticky="w", padx=10, pady=6)
+        exp_frame = ttk.Frame(container)
+        exp_frame.grid(row=0, column=1, sticky="w", padx=10, pady=6)
+        
+        self._exp_spin = ttk.Spinbox(exp_frame, from_=0, to=10, width=5, textvariable=self._pref_exp_val)
+        self._exp_spin.pack(side="left", padx=2)
+        
+        def toggle_exp():
+            if self._pref_exp_ai.get():
+                self._exp_spin.config(state="disabled")
+            else:
+                self._exp_spin.config(state="normal")
+                
+        ttk.Checkbutton(exp_frame, text="Let AI Decide", variable=self._pref_exp_ai, command=toggle_exp).pack(side="left", padx=10)
+
+        # Row 1: Project Count
+        ttk.Label(container, text="Target Project Entries:").grid(row=1, column=0, sticky="w", padx=10, pady=6)
+        proj_frame = ttk.Frame(container)
+        proj_frame.grid(row=1, column=1, sticky="w", padx=10, pady=6)
+        
+        self._proj_spin = ttk.Spinbox(proj_frame, from_=0, to=10, width=5, textvariable=self._pref_proj_val)
+        self._proj_spin.pack(side="left", padx=2)
+        
+        def toggle_proj():
+            if self._pref_proj_ai.get():
+                self._proj_spin.config(state="disabled")
+            else:
+                self._proj_spin.config(state="normal")
+                
+        ttk.Checkbutton(proj_frame, text="Let AI Decide", variable=self._pref_proj_ai, command=toggle_proj).pack(side="left", padx=10)
+
+        # Row 2: Achievement Count
+        ttk.Label(container, text="Target Achievement Entries:").grid(row=2, column=0, sticky="w", padx=10, pady=6)
+        ach_frame = ttk.Frame(container)
+        ach_frame.grid(row=2, column=1, sticky="w", padx=10, pady=6)
+        
+        self._ach_spin = ttk.Spinbox(ach_frame, from_=0, to=10, width=5, textvariable=self._pref_ach_val)
+        self._ach_spin.pack(side="left", padx=2)
+        
+        def toggle_ach():
+            if self._pref_ach_ai.get():
+                self._ach_spin.config(state="disabled")
+            else:
+                self._ach_spin.config(state="normal")
+                
+        ttk.Checkbutton(ach_frame, text="Let AI Decide", variable=self._pref_ach_ai, command=toggle_ach).pack(side="left", padx=10)
+
+        # Row 3: Certification Count
+        ttk.Label(container, text="Target Certification Entries:").grid(row=3, column=0, sticky="w", padx=10, pady=6)
+        cert_frame = ttk.Frame(container)
+        cert_frame.grid(row=3, column=1, sticky="w", padx=10, pady=6)
+        
+        self._cert_spin = ttk.Spinbox(cert_frame, from_=0, to=10, width=5, textvariable=self._pref_cert_val)
+        self._cert_spin.pack(side="left", padx=2)
+        
+        def toggle_cert():
+            if self._pref_cert_ai.get():
+                self._cert_spin.config(state="disabled")
+            else:
+                self._cert_spin.config(state="normal")
+                
+        ttk.Checkbutton(cert_frame, text="Let AI Decide", variable=self._pref_cert_ai, command=toggle_cert).pack(side="left", padx=10)
+
+        # Row 4: Bullets per Experience
+        ttk.Label(container, text="Bullets per Experience Entry:").grid(row=4, column=0, sticky="w", padx=10, pady=6)
+        bullets_exp_frame = ttk.Frame(container)
+        bullets_exp_frame.grid(row=4, column=1, sticky="w", padx=10, pady=6)
+        
+        self._bullets_exp_spin = ttk.Spinbox(bullets_exp_frame, from_=1, to=15, width=5, textvariable=self._pref_bullets_exp_val)
+        self._bullets_exp_spin.pack(side="left", padx=2)
+        
+        def toggle_bullets_exp():
+            if self._pref_bullets_exp_ai.get():
+                self._bullets_exp_spin.config(state="disabled")
+            else:
+                self._bullets_exp_spin.config(state="normal")
+                
+        ttk.Checkbutton(bullets_exp_frame, text="Let AI Decide", variable=self._pref_bullets_exp_ai, command=toggle_bullets_exp).pack(side="left", padx=10)
+
+        # Row 5: Bullets per Project
+        ttk.Label(container, text="Bullets per Project Entry:").grid(row=5, column=0, sticky="w", padx=10, pady=6)
+        bullets_proj_frame = ttk.Frame(container)
+        bullets_proj_frame.grid(row=5, column=1, sticky="w", padx=10, pady=6)
+        
+        self._bullets_proj_spin = ttk.Spinbox(bullets_proj_frame, from_=1, to=15, width=5, textvariable=self._pref_bullets_proj_val)
+        self._bullets_proj_spin.pack(side="left", padx=2)
+        
+        def toggle_bullets_proj():
+            if self._pref_bullets_proj_ai.get():
+                self._bullets_proj_spin.config(state="disabled")
+            else:
+                self._bullets_proj_spin.config(state="normal")
+                
+        ttk.Checkbutton(bullets_proj_frame, text="Let AI Decide", variable=self._pref_bullets_proj_ai, command=toggle_bullets_proj).pack(side="left", padx=10)
+
+        # Row 6: Output File Name
+        ttk.Label(container, text="Output File Name:").grid(row=6, column=0, sticky="w", padx=10, pady=6)
+        self._output_filename_entry = ttk.Entry(container, width=30, textvariable=self._pref_output_filename)
+        self._output_filename_entry.grid(row=6, column=1, sticky="w", padx=10, pady=6)
+
+        # Row 7: Toggles
+        ttk.Label(container, text="Include Summary:").grid(row=7, column=0, sticky="w", padx=10, pady=6)
+        ttk.Checkbutton(container, text="", variable=self._pref_include_summary).grid(row=7, column=1, sticky="w", padx=10, pady=6)
+
+        ttk.Label(container, text="Include Skills Section:").grid(row=8, column=0, sticky="w", padx=10, pady=6)
+        ttk.Checkbutton(container, text="", variable=self._pref_include_skills).grid(row=8, column=1, sticky="w", padx=10, pady=6)
+
+        # Row 9: Custom instructions text
+        ttk.Label(container, text="Custom Tailoring Instructions:").grid(row=9, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 2))
+        self._custom_instr_text = scrolledtext.ScrolledText(
+            container, height=6, font=("Segoe UI", 10),
+            bg=self.ENTRY_BG, fg=self.FG, insertbackground=self.FG,
+            relief="flat", wrap="word",
+        )
+        self._custom_instr_text.grid(row=10, column=0, columnspan=2, sticky="nsew", padx=10, pady=(2, 10))
+        container.rowconfigure(10, weight=1)
+
+        # Initialize spinbox states
+        toggle_exp()
+        toggle_proj()
+        toggle_ach()
+        toggle_cert()
+        toggle_bullets_exp()
+        toggle_bullets_proj()
+
+    def _save_preferences(self):
+        try:
+            prefs = {
+                "experience_count": None if self._pref_exp_ai.get() else int(self._pref_exp_val.get()),
+                "project_count": None if self._pref_proj_ai.get() else int(self._pref_proj_val.get()),
+                "achievement_count": None if self._pref_ach_ai.get() else int(self._pref_ach_val.get()),
+                "certification_count": None if self._pref_cert_ai.get() else int(self._pref_cert_val.get()),
+                "bullets_per_experience": None if self._pref_bullets_exp_ai.get() else int(self._pref_bullets_exp_val.get()),
+                "bullets_per_project": None if self._pref_bullets_proj_ai.get() else int(self._pref_bullets_proj_val.get()),
+                "output_file_name": self._pref_output_filename.get().strip() or "resume",
+                "include_summary": self._pref_include_summary.get(),
+                "include_skills": self._pref_include_skills.get(),
+                "custom_instructions": self._custom_instr_text.get("1.0", "end-1c").strip() or None,
+            }
+            self._bridge.save_prefs(prefs)
+            self._status("✓ Preferences saved successfully.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save preferences: {e}")
+
+    # ── Tab 5: Quick Tailor ───────────────────────────────────────────────────
 
     def _build_tailor_tab(self):
         frame = self._tab_tailor
@@ -572,6 +820,7 @@ class ProfileManagerApp(tk.Tk):
         self._tailor_output.pack(fill="both", expand=True, padx=4, pady=4)
 
         self._last_pdf_path: Optional[str] = None
+        self._active_session_id: Optional[str] = None
 
     def _set_tailor_output(self, text: str):
         self._tailor_output.configure(state="normal")
@@ -588,15 +837,27 @@ class ProfileManagerApp(tk.Tk):
             "Run the full pipeline: analyze JD, tailor content, score ATS match."
         )
 
+        if not self._active_session_id:
+            import uuid
+            self._active_session_id = str(uuid.uuid4())
+
         def on_done(result: dict):
             tailored = result.get("tailored")
+            session_id = result.get("session_id")
+            raw_resp = result.get("response") or ""
+            if session_id:
+                self._active_session_id = session_id
+                
             if tailored:
                 preview = f"✓ Tailoring complete!\n\nSummary:\n{tailored.get('summary', '')[:300]}\n\n"
                 preview += f"Experience entries: {len(tailored.get('experience', []))}\n"
                 preview += f"Projects: {len(tailored.get('projects', []))}\n"
                 preview += f"Skills categories: {len(tailored.get('skills', {}))}\n"
             else:
-                preview = "Tailoring completed but no tailored sections were found in state."
+                preview = (
+                    "Tailoring completed but no tailored sections were found in state.\n\n"
+                    f"Agent Response:\n{raw_resp}"
+                )
             self.after(0, lambda: self._tailor_progress.config(text="✓ Tailoring complete."))
             self.after(0, lambda: self._set_tailor_output(preview))
 
@@ -604,13 +865,21 @@ class ProfileManagerApp(tk.Tk):
             self.after(0, lambda: self._tailor_progress.config(text=f"✗ Error: {error[:80]}"))
             self.after(0, lambda: self._set_tailor_output(f"Error:\n{error}"))
 
-        self._bridge.run_pipeline_async(instruction, on_done, on_error)
+        self._bridge.run_pipeline_async(instruction, on_done, on_error, session_id=self._active_session_id)
 
     def _compile_pdf(self):
         self._tailor_progress.config(text="⏳ Compiling PDF...")
 
+        if not self._active_session_id:
+            import uuid
+            self._active_session_id = str(uuid.uuid4())
+
         def on_done(result: dict):
             pdf_path = result.get("pdf_path")
+            session_id = result.get("session_id")
+            if session_id:
+                self._active_session_id = session_id
+
             if pdf_path:
                 self._last_pdf_path = pdf_path
                 self.after(0, lambda: self._tailor_open_btn.config(state="normal"))
@@ -628,6 +897,7 @@ class ProfileManagerApp(tk.Tk):
         self._bridge.run_pipeline_async(
             "Compile the PDF from the current tailored resume.",
             on_done, on_error,
+            session_id=self._active_session_id
         )
 
     def _open_pdf(self):
@@ -654,6 +924,72 @@ class ProfileManagerApp(tk.Tk):
             self._update_jd_char_count()
 
         self._refresh_templates()
+
+        # Load preferences
+        try:
+            prefs = self._bridge.load_prefs()
+            if prefs:
+                # Experience Count
+                self._pref_exp_ai.set(prefs.get("experience_count") is None)
+                if prefs.get("experience_count") is not None:
+                    self._pref_exp_val.set(prefs["experience_count"])
+                    self._exp_spin.config(state="normal")
+                else:
+                    self._exp_spin.config(state="disabled")
+
+                # Project Count
+                self._pref_proj_ai.set(prefs.get("project_count") is None)
+                if prefs.get("project_count") is not None:
+                    self._pref_proj_val.set(prefs["project_count"])
+                    self._proj_spin.config(state="normal")
+                else:
+                    self._proj_spin.config(state="disabled")
+
+                # Achievement Count
+                self._pref_ach_ai.set(prefs.get("achievement_count") is None)
+                if prefs.get("achievement_count") is not None:
+                    self._pref_ach_val.set(prefs["achievement_count"])
+                    self._ach_spin.config(state="normal")
+                else:
+                    self._ach_spin.config(state="disabled")
+
+                # Certification Count
+                self._pref_cert_ai.set(prefs.get("certification_count") is None)
+                if prefs.get("certification_count") is not None:
+                    self._pref_cert_val.set(prefs["certification_count"])
+                    self._cert_spin.config(state="normal")
+                else:
+                    self._cert_spin.config(state="disabled")
+
+                # Bullets per Experience
+                self._pref_bullets_exp_ai.set(prefs.get("bullets_per_experience") is None)
+                if prefs.get("bullets_per_experience") is not None:
+                    self._pref_bullets_exp_val.set(prefs["bullets_per_experience"])
+                    self._bullets_exp_spin.config(state="normal")
+                else:
+                    self._bullets_exp_spin.config(state="disabled")
+
+                # Bullets per Project
+                self._pref_bullets_proj_ai.set(prefs.get("bullets_per_project") is None)
+                if prefs.get("bullets_per_project") is not None:
+                    self._pref_bullets_proj_val.set(prefs["bullets_per_project"])
+                    self._bullets_proj_spin.config(state="normal")
+                else:
+                    self._bullets_proj_spin.config(state="disabled")
+
+                # Output File Name
+                self._pref_output_filename.set(prefs.get("output_file_name") or "resume")
+
+                # Toggles
+                self._pref_include_summary.set(prefs.get("include_summary", True))
+                self._pref_include_skills.set(prefs.get("include_skills", True))
+
+                # Custom Instructions
+                if prefs.get("custom_instructions"):
+                    self._custom_instr_text.delete("1.0", "end")
+                    self._custom_instr_text.insert("1.0", prefs["custom_instructions"])
+        except Exception as e:
+            logger.warning("Failed to load initial preferences: %s", e)
 
 
 # ---------------------------------------------------------------------------

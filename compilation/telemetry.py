@@ -23,7 +23,7 @@ from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 from opentelemetry.sdk.resources import Resource, SERVICE_NAME
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-from opentelemetry.instrumentation.httpx import HttpxInstrumentor
+from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 from opentelemetry.instrumentation.logging import LoggingInstrumentor
 
 logger = logging.getLogger(__name__)
@@ -42,12 +42,17 @@ def setup_telemetry(app) -> None:
     global _SDK_INITIALISED
     if _SDK_INITIALISED:
         return
+
+    # Check if telemetry is disabled (default to True if not specified)
+    disable_telemetry = os.getenv("DISABLE_TELEMETRY", "true").lower() in ("true", "1", "yes")
+    endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+
+    if disable_telemetry or not endpoint:
+        logger.info("Telemetry is disabled (DISABLE_TELEMETRY=true or OTEL_EXPORTER_OTLP_ENDPOINT is empty).")
+        return
+
     _SDK_INITIALISED = True
 
-    endpoint = os.getenv(
-        "OTEL_EXPORTER_OTLP_ENDPOINT",
-        "http://otel-collector-service.resume-agent.svc.cluster.local:4317",
-    )
     service_name = os.getenv("OTEL_SERVICE_NAME", "compilation")
 
     resource = Resource.create({SERVICE_NAME: service_name})
@@ -77,7 +82,7 @@ def setup_telemetry(app) -> None:
         app,
         excluded_urls="health,/health",
     )
-    HttpxInstrumentor().instrument()
+    HTTPXClientInstrumentor().instrument()
 
     logger.info(
         "OTel SDK initialised",

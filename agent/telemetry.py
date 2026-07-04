@@ -51,12 +51,17 @@ def setup_telemetry(app) -> None:
     global _SDK_INITIALISED
     if _SDK_INITIALISED:
         return
+
+    # Check if telemetry is disabled (default to True if not specified)
+    disable_telemetry = os.getenv("DISABLE_TELEMETRY", "true").lower() in ("true", "1", "yes")
+    endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+
+    if disable_telemetry or not endpoint:
+        logger.info("Telemetry is disabled (DISABLE_TELEMETRY=true or OTEL_EXPORTER_OTLP_ENDPOINT is empty).")
+        return
+
     _SDK_INITIALISED = True
 
-    endpoint = os.getenv(
-        "OTEL_EXPORTER_OTLP_ENDPOINT",
-        "http://otel-collector-service.resume-agent.svc.cluster.local:4317",
-    )
     service_name = os.getenv("OTEL_SERVICE_NAME", "agent")
 
     resource = Resource.create({SERVICE_NAME: service_name})

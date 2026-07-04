@@ -115,66 +115,113 @@ def _extract_final_response(session) -> str:
 # Core agent runner
 # ---------------------------------------------------------------------------
 
-async def _run_agent(instruction: str, show_ats: bool = True) -> dict:
+async def _run_agent(instruction: str, session_id: str | None = None) -> dict:
     """
-    Run the resume builder agent with the given instruction.
-
-    Suppresses all intermediate events. Returns:
-        {
-          "response": str,           # Final agent text response
-          "tailored": dict | None,   # TailoredSections from state
-          "ats_score": dict | None,  # ATSScore from state (if available)
-          "tex_path": str | None,
-          "pdf_path": str | None,
-        }
+    Run the resume builder agent by calling the native ADK API server.
     """
-    from agent import create_agent
-    from google.adk import Runner
-    from google.adk.sessions.in_memory_session_service import InMemorySessionService
-    from google.genai import types
-
-    agent = create_agent()
-    session_service = InMemorySessionService()
-
-    runner = Runner(
-        app_name="resume_builder_agent",
-        agent=agent,
-        session_service=session_service,
-        auto_create_session=True,
-    )
-
-    session_id = str(uuid.uuid4())
-    user_id = f"cli_user_{session_id}"
-
-    async for _ in runner.run_async(
-        user_id=user_id,
-        session_id=session_id,
-        new_message=types.Content(parts=[types.Part.from_text(text=instruction)]),
-    ):
-        pass  # Consume all events silently
-
-    session = await session_service.get_session(
-        app_name="resume_builder_agent",
-        user_id=user_id,
-        session_id=session_id,
-    )
-
-    final_response = _extract_final_response(session) if session else ""
-    tailored = None
-    if session:
-        tailored = session.state.get("tailored_sections") or session.state.get("tailored_resume")
-
-    output_dir = os.getenv("OUTPUT_DIR", "output")
-    tex_path = os.path.join(output_dir, "resume.tex") if os.path.exists(os.path.join(output_dir, "resume.tex")) else None
-    pdf_path = os.path.join(output_dir, "resume.pdf") if os.path.exists(os.path.join(output_dir, "resume.pdf")) else None
-
-    return {
-        "response": final_response,
-        "tailored": tailored,
-        "tex_path": tex_path,
-        "pdf_path": pdf_path,
-        "session": session,
-    }
+    import httpx
+    
+    if not session_id:
+        session_id = str(uuid.uuid4())
+        
+    base_url = os.getenv("AGENT_SERVICE_URL", "http://localhost:8000")
+    user_id = "cli_user"
+    
+    # 1. Run the agent step
+    url_run = f"{base_url}/run"
+    try:
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            response = await client.post(
+                url_run,
+                json={
+                    "appName": "agent",
+                    "userId": user_id,
+                    "sessionId": session_id,
+                    "newMessage": {
+                        "role": "user",
+                        "parts": [{"text": instruction}]
+                    }
+                }
+            )
+            response.raise_for_status()
+            events = response.json()
+            
+            # Extract final text response from events array
+            final_response = ""
+            SKIP_PREFIXES = (
+                "The user wants", "According to", "Following my", "Plan:",
+                "Step 1:", "I will now", "I must:", "My workflow is:",
+                "Looking at the context", "I will call", "I encountered",
+                "Corrected Payload",
+            )
+            
+            # Read events in reverse to find the last orchestrator turn complete response
+            for event in reversed(events):
+                author = event.get("author")
+                if author not in ("resume_builder_agent", "tailoring_agent", "compilation_agent"):
+                    continue
+                if event.get("partial") or event.get("thought"):
+                    continue
+                    
+                content = event.get("content")
+                if not content:
+                    continue
+                    
+                parts = content.get("parts") or []
+                text_bits = []
+                for p in parts:
+                    if p.get("thought") or p.get("functionCall") or p.get("functionResponse"):
+                        continue
+                    text = p.get("text")
+                    if text and text.strip():
+                        if not any(text.strip().startswith(ph) for ph in SKIP_PREFIXES):
+                            text_bits.append(text.strip())
+                            
+                if text_bits:
+                    final_response = "\n".join(text_bits)
+                    break
+            
+            # 2. Fetch session state to retrieve tailored sections
+            url_session = f"{base_url}/apps/agent/users/{user_id}/sessions/{session_id}"
+            state_resp = await client.get(url_session)
+            state_resp.raise_for_status()
+            session_data = state_resp.json()
+            state = session_data.get("state", {})
+            tailored = state.get("tailored_sections") or state.get("tailored_resume")
+            
+            # Output file checking
+            output_dir = os.getenv("OUTPUT_DIR", "output")
+            tex_path = os.path.join(output_dir, "resume.tex") if os.path.exists(os.path.join(output_dir, "resume.tex")) else None
+            pdf_path = os.path.join(output_dir, "resume.pdf") if os.path.exists(os.path.join(output_dir, "resume.pdf")) else None
+            
+            return {
+                "response": final_response,
+                "tailored": tailored,
+                "tex_path": tex_path,
+                "pdf_path": pdf_path,
+                "session_id": session_id,
+            }
+    except httpx.ConnectError:
+        console.print(
+            "\n[red]Error: Cannot connect to the ADK API server.[/red]\n"
+            "Please make sure the ADK API server is running on port 8000.\n"
+            "Run [cyan]uv run adk api_server --session_service_uri=sqlite:///data/sessions.db ..[/cyan] in the [cyan]agent/[/cyan] directory."
+        )
+        sys.exit(1)
+    except httpx.HTTPStatusError as e:
+        console.print(f"\n[red]Error: ADK API server returned status {e.response.status_code}[/red]")
+        try:
+            err_json = e.response.json()
+            if "error" in err_json:
+                console.print(f"[red]Details:[/red] {err_json['error']}")
+            elif "detail" in err_json:
+                console.print(f"[red]Details:[/red] {err_json['detail']}")
+        except Exception:
+            console.print(f"[red]Details:[/red] {e.response.text}")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"\n[red]Error occurred while communicating with the agent server:[/red] {e}")
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +288,7 @@ def _run_pipeline(profile: dict, no_interactive: bool = False, compile_pdf: bool
     from cli_formatter import spinner, format_resume_preview, format_ats_score, format_output_summary
 
     candidate_name = profile.get("name", "")
+    session_id = str(uuid.uuid4())
 
     # Step 1: Tailor
     tailor_instruction = (
@@ -251,7 +299,7 @@ def _run_pipeline(profile: dict, no_interactive: bool = False, compile_pdf: bool
         tailor_instruction += " Then compile the PDF."
 
     with spinner(f"Tailoring resume for {candidate_name or 'candidate'}..."):
-        result = asyncio.run(_run_agent(tailor_instruction))
+        result = asyncio.run(_run_agent(tailor_instruction, session_id=session_id))
 
     tailored = result.get("tailored")
     agent_response = result.get("response", "")
@@ -266,7 +314,7 @@ def _run_pipeline(profile: dict, no_interactive: bool = False, compile_pdf: bool
     format_resume_preview(tailored, name=candidate_name)
 
     # Step 2: ATS Scoring feedback loop
-    _run_ats_feedback_loop(tailored, no_interactive=no_interactive)
+    _run_ats_feedback_loop(tailored, session_id=session_id, no_interactive=no_interactive)
 
     # Step 3: Compile (if requested or user confirms)
     if not compile_pdf and not no_interactive:
@@ -275,7 +323,8 @@ def _run_pipeline(profile: dict, no_interactive: bool = False, compile_pdf: bool
     if compile_pdf:
         with spinner("Compiling PDF..."):
             compile_result = asyncio.run(_run_agent(
-                "Compile the PDF from the current tailored resume."
+                "Compile the PDF from the current tailored resume.",
+                session_id=session_id
             ))
         format_output_summary(
             compile_result.get("tex_path", "output/resume.tex"),
@@ -289,7 +338,7 @@ def _run_pipeline(profile: dict, no_interactive: bool = False, compile_pdf: bool
         console.print(f"\n[bold cyan]Agent:[/bold cyan] {agent_response}")
 
 
-def _run_ats_feedback_loop(tailored: dict, no_interactive: bool = False, max_iterations: int = 2):
+def _run_ats_feedback_loop(tailored: dict, session_id: str, no_interactive: bool = False, max_iterations: int = 2):
     """Run ATS scoring and optionally trigger re-tailoring if score is below threshold."""
     from cli_formatter import spinner, format_ats_score, format_resume_preview
     from storage_client import storage as _storage
@@ -300,7 +349,10 @@ def _run_ats_feedback_loop(tailored: dict, no_interactive: bool = False, max_ite
     for iteration in range(max_iterations + 1):
         # Score current resume
         with spinner("Scoring ATS keyword match..."):
-            score_result = asyncio.run(_run_agent("Score my current tailored resume against the job description."))
+            score_result = asyncio.run(_run_agent(
+                "Score my current tailored resume against the job description.",
+                session_id=session_id
+            ))
 
         # Extract ATS score from agent response (parse JSON from response or use fallback)
         score_data: dict = {}
@@ -352,7 +404,7 @@ def _run_ats_feedback_loop(tailored: dict, no_interactive: bool = False, max_ite
         )
 
         with spinner(f"Improving coverage (iteration {iteration + 1}/{max_iterations})..."):
-            improve_result = asyncio.run(_run_agent(gap_instruction))
+            improve_result = asyncio.run(_run_agent(gap_instruction, session_id=session_id))
 
         new_tailored = improve_result.get("tailored")
         if new_tailored:

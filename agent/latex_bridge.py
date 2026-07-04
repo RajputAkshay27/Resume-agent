@@ -376,7 +376,7 @@ def render_resume(template_content: str, tailored_data: Union["FullResume", Tail
 # PDF compilation
 # ---------------------------------------------------------------------------
 
-def compile_pdf(tex_content: str, output_dir: str | None = None) -> str:
+def compile_pdf(tex_content: str, output_dir: str | None = None, filename: str = "resume") -> str:
     """Compile a .tex string to PDF using pdflatex.
 
     Security: sanitize_latex() is applied first to strip dangerous commands
@@ -385,6 +385,7 @@ def compile_pdf(tex_content: str, output_dir: str | None = None) -> str:
     Args:
         tex_content: The complete LaTeX source.
         output_dir: Directory to write files in. If None, a temp dir is created.
+        filename:   Base name of the output files (no extension).
 
     Returns:
         Absolute path to the generated PDF file.
@@ -392,14 +393,20 @@ def compile_pdf(tex_content: str, output_dir: str | None = None) -> str:
     Raises:
         RuntimeError: If pdflatex fails to produce a PDF.
     """
+    import re
     # Security: remove dangerous LaTeX commands before compilation
     tex_content = _sanitize_latex(tex_content)
+
+    # Sanitize filename
+    filename = re.sub(r"[^a-zA-Z0-9_\-]", "", filename)
+    if not filename:
+        filename = "resume"
 
     if output_dir is None:
         output_dir = tempfile.mkdtemp(prefix="resume_")
 
-    tex_path = os.path.join(output_dir, "resume.tex")
-    pdf_path = os.path.join(output_dir, "resume.pdf")
+    tex_path = os.path.join(output_dir, f"{filename}.tex")
+    pdf_path = os.path.join(output_dir, f"{filename}.pdf")
 
     # Write .tex file (use newline="" to prevent CRLF issues on Windows)
     with open(tex_path, "w", encoding="utf-8", newline="") as f:
@@ -415,7 +422,7 @@ def compile_pdf(tex_content: str, output_dir: str | None = None) -> str:
                     "-interaction=nonstopmode",
                     "-halt-on-error",
                     "-file-line-error",
-                    "resume.tex",
+                    f"{filename}.tex",
                 ],
                 cwd=output_dir,
                 stdout=subprocess.PIPE,

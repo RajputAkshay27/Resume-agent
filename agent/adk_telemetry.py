@@ -67,6 +67,12 @@ def adk_before_tool(tool, args: dict, tool_context) -> None:
     Returns:
         None — tells ADK to proceed with the normal tool execution.
     """
+    import os
+    disable_telemetry = os.getenv("DISABLE_TELEMETRY", "true").lower() in ("true", "1", "yes")
+    endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+    if disable_telemetry or not endpoint:
+        return None
+
     tool_name: str = getattr(tool, "name", str(tool))
     agent_name: str = getattr(tool_context, "agent_name", "unknown")
 
@@ -108,6 +114,12 @@ def adk_after_tool(tool, args: dict, tool_context, tool_response: Any) -> Any:
     Returns:
         tool_response unchanged — ADK requires we pass it through.
     """
+    import os
+    disable_telemetry = os.getenv("DISABLE_TELEMETRY", "true").lower() in ("true", "1", "yes")
+    endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+    if disable_telemetry or not endpoint:
+        return tool_response
+
     tool_name: str = getattr(tool, "name", str(tool))
 
     store = dict(_span_store.get())

@@ -22,7 +22,18 @@ Security:
 
 import logging
 import os
+import sys
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Ensure local imports (tools, schemas, adk_telemetry) can be resolved
+agent_dir = str(Path(__file__).parent.resolve())
+if agent_dir not in sys.path:
+    sys.path.append(agent_dir)
+
+# Load environment variables at startup
+load_dotenv(Path(__file__).parent / ".env")
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 from google.adk.agents import Agent
 from google.adk.models.lite_llm import LiteLlm
@@ -152,7 +163,7 @@ def create_agent() -> Agent:
         after_agent_callback=enforce_preferences,
         generate_content_config=types.GenerateContentConfig(
             temperature=0.7,
-            max_output_tokens=4096,
+            max_output_tokens=2048,
         ),
         tools=[get_all_context, submit_tailored_sections],
         before_tool_callback=adk_before_tool,
@@ -189,7 +200,7 @@ def create_agent() -> Agent:
         instruction=_ORCHESTRATOR_INSTRUCTION,
         generate_content_config=types.GenerateContentConfig(
             temperature=0.5,
-            max_output_tokens=1024,  # Orchestrator responses are concise
+            max_output_tokens=512,  # Orchestrator responses are concise
         ),
         tools=[read_state, analyze_jd, score_ats_match, diff_resume],
         sub_agents=[tailoring_agent, compilation_agent],
@@ -203,3 +214,7 @@ def create_agent() -> Agent:
     )
 
     return root_agent
+
+
+# Expose root_agent at module level for ADK API server loader
+root_agent = create_agent()

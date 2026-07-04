@@ -237,5 +237,15 @@ def compile_pdf(tex_content: str, output_dir: str | None = None) -> str:
             f"LaTeX compilation failed. Last pdflatex exit code: {process.returncode}"
         )
 
+    # Clean up auxiliary LaTeX files (delete all files starting with resume. except .pdf and .tex)
+    try:
+        for f in os.listdir(output_dir):
+            if f.startswith("resume.") and not (f.endswith(".pdf") or f.endswith(".tex")):
+                file_path = os.path.join(output_dir, f)
+                if os.path.isfile(file_path):
+                    os.remove(file_path)
+    except Exception as e:
+        logger.warning("Failed to clean up auxiliary LaTeX files: %s", e)
+
     logger.info("PDF compiled successfully: %s", pdf_path)
     return pdf_path

@@ -107,7 +107,7 @@ def _coerce_prefs(raw: dict) -> dict:
                 coerced[key] = value
             else:
                 coerced[key] = bool(value)
-        elif key.endswith("_count"):
+        elif key.endswith("_count") or key.startswith("bullets_"):
             if value is None or value in ("null", ""):
                 coerced[key] = None
             elif isinstance(value, str):
@@ -277,6 +277,10 @@ def get_all_context(tool_context: ToolContext) -> str:
             pref_lines.append(f"Projects: select exactly {prefs.project_count} items.")
         if prefs.achievement_count is not None:
             pref_lines.append(f"Achievements: select exactly {prefs.achievement_count} items.")
+        if prefs.bullets_per_experience is not None:
+            pref_lines.append(f"Bullets per Experience: include exactly {prefs.bullets_per_experience} bullet points for each experience entry.")
+        if prefs.bullets_per_project is not None:
+            pref_lines.append(f"Bullets per Project: include exactly {prefs.bullets_per_project} bullet points for each project entry.")
         if not prefs.include_summary:
             pref_lines.append("Summary: Do NOT include a summary (set to empty string).")
         if not prefs.include_skills:
@@ -360,7 +364,8 @@ def submit_tailored_sections(payload: dict, tool_context: ToolContext) -> str:
     Submit the finalized tailored resume sections for validation and storage.
 
     Validates ONLY the TailoredSections schema (summary, experience, projects,
-    skills, achievements) — NOT static identity fields.
+    skills, achievements) — NOT static identity fields. Also performs a fabrication
+    check against the master profile to prevent hallucinated companies or projects.
 
     Call this ONLY AFTER get_all_context and after drafting all content.
 
@@ -368,7 +373,27 @@ def submit_tailored_sections(payload: dict, tool_context: ToolContext) -> str:
         payload: A dict matching the TailoredSections schema.
     """
     try:
+        # 1. Schema validation
         TailoredSections(**payload)
+
+        # 2. Fabrication check
+        from guardrails import verify_no_fabrication
+        scratchpad = tool_context.state.get("scratchpad") or {}
+        master_profile = scratchpad.get("master_profile") or {}
+        if not master_profile:
+            from storage_client import storage
+            master_profile = storage().load_profile() or {}
+
+        warnings = verify_no_fabrication(payload, master_profile)
+        if warnings:
+            warning_str = "\n".join(warnings)
+            logger.warning("[submit_tailored_sections] Rejecting payload due to fabrication:\n%s", warning_str)
+            return (
+                f"FAILURE: Fabrication check failed. You generated data not present in the master profile:\n{warning_str}\n\n"
+                "Please rewrite the tailored sections to contain ONLY the companies and projects listed in the master profile, "
+                "then call submit_tailored_sections again with the FULL corrected payload."
+            )
+
         return "SUCCESS: Tailored sections validated and accepted."
 
     except ValidationError as e:
@@ -475,14 +500,20 @@ def render_latex(tool_context: ToolContext) -> str:
         output_dir = os.getenv("OUTPUT_DIR", "output")
         os.makedirs(output_dir, exist_ok=True)
 
-        import os as _os
-        tex_path = _os.path.join(output_dir, "resume.tex")
+        raw_prefs = scratchpad.get("section_prefs") or {}
+        output_filename = raw_prefs.get("output_file_name") or "resume"
+        import re as _re
+        output_filename = _re.sub(r"[^a-zA-Z0-9_\-]", "", output_filename)
+        if not output_filename:
+            output_filename = "resume"
+
+        tex_path = os.path.join(output_dir, f"{output_filename}.tex")
         with open(tex_path, "w", encoding="utf-8", newline="") as f:
             f.write(rendered_tex)
 
         pdf_path: str | None = None
         try:
-            pdf_path = compile_pdf(rendered_tex, output_dir)
+            pdf_path = compile_pdf(rendered_tex, output_dir, filename=output_filename)
         except Exception as e:
             logger.warning("[render_latex] PDF compilation failed (pdflatex installed?): %s", e)
 
@@ -494,11 +525,10 @@ def render_latex(tool_context: ToolContext) -> str:
         except Exception as e:
             logger.warning("[render_latex] Failed to save tailored output to history: %s", e)
 
-        msg = f"LaTeX rendered successfully → {tex_path}\n"
         if pdf_path:
-            msg += f"PDF compiled successfully → {pdf_path}"
+            msg = f"PDF compiled successfully → {pdf_path}"
         else:
-            msg += "PDF compilation skipped (pdflatex not found or failed). The .tex file is ready."
+            msg = "LaTeX rendered successfully. The document is ready."
 
         return msg
 
@@ -576,6 +606,20 @@ def enforce_preferences(callback_context: CallbackContext) -> None:
     if not prefs.include_skills and data.get("skills"):
         data["skills"] = {}
         changed = True
+
+    # Truncate bullets per experience entry
+    if prefs.bullets_per_experience is not None:
+        for exp in data.get("experience", []):
+            if len(exp.get("bullets", [])) > prefs.bullets_per_experience:
+                exp["bullets"] = exp["bullets"][: prefs.bullets_per_experience]
+                changed = True
+
+    # Truncate bullets per project entry
+    if prefs.bullets_per_project is not None:
+        for proj in data.get("projects", []):
+            if len(proj.get("bullets", [])) > prefs.bullets_per_project:
+                proj["bullets"] = proj["bullets"][: prefs.bullets_per_project]
+                changed = True
 
     if changed:
         try:

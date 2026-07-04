@@ -9,6 +9,7 @@ Two endpoints:
 """
 
 import os
+import sys
 import hashlib
 import base64
 import shutil
@@ -26,7 +27,7 @@ from latex_bridge import render_resume, compile_pdf
 from logging_config import setup_logging
 
 # Import guardrails for LaTeX injection protection
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "agent"))
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", "agent"))
 try:
     from guardrails import sanitize_latex
 except ImportError:
